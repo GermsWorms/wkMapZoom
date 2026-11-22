@@ -6,6 +6,11 @@ Zoom the map in and out in **Worms Armageddon 3.8.1**: hold **Ctrl** and turn th
 Only the map zooms. The team bars, turn timer, wind, messages, chat, Esc menu and weapon menu stay their normal
 size, and a small number (for example `150%`) shows the zoom while you change it.
 
+![Auto zoom and the movement line on a rope race map](screenshots/auto-zoom.gif)
+
+*The auto zoom on a big rope race map: it eases out as the worm heads into the open and back in where it gets tight
+(the number top right is the zoom), and at the turn's start the red line shows where the worm went last turn.*
+
 Also in the module:
 
 - **True colour.** The zoomed map is averaged in full RGB and shown as it is (with WA's renderer on one of its
