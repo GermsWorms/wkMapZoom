@@ -33,6 +33,8 @@ static wchar_t levels_dir[MAX_PATH];
 static CRITICAL_SECTION lock;
 static HANDLE (WINAPI *orig_cfa)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 static HANDLE (WINAPI *orig_cfw)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+
+void colourmap_originals(const void **a, const void **w) { *a = (const void *)orig_cfa; *w = (const void *)orig_cfw; }
 static LONG temp_n;
 
 /* WA's themes by number (the settings' theme word): WA's own table 00649BA0 (the first five: the drawn-map themes) */

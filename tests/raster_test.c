@@ -90,7 +90,18 @@ static int cdiff(uint32_t a, uint32_t b) {
     return m;
 }
 
-/* one op over a background of index bg: the output against the reference; max and mean error */
+/* an output pixel on an edge the drawing snaps to whole pixels (an operation at least a pixel across along that axis):
+ * there it is all the operation's or none of it, by design, where the reference shares it */
+static int snapped_edge(const rop *op, const rview *v, int X, int Y) {
+    const double fx1 = (op->l - v->bx) * v->z + v->ox, fx2 = (op->r - v->bx) * v->z + v->ox;
+    const double fy1 = (op->t - v->by) * v->z + v->oy, fy2 = (op->b - v->by) * v->z + v->oy;
+    const int inx = X >= (int)floor(fx1) && X < (int)ceil(fx2), iny = Y >= (int)floor(fy1) && Y < (int)ceil(fy2);
+    const int ex = (X >= (int)floor(fx1) && X < (int)ceil(fx1)) || (X >= (int)floor(fx2) && X < (int)ceil(fx2));
+    const int ey = (Y >= (int)floor(fy1) && Y < (int)ceil(fy1)) || (Y >= (int)floor(fy2) && Y < (int)ceil(fy2));
+    return (fx2 - fx1 >= 1.0 && ex && iny) || (fy2 - fy1 >= 1.0 && ey && inx);
+}
+
+/* one op over a background of index bg: the output against the reference (snapped edges aside); max and mean error */
 static void check(const char *name, const rop *op, rview *v, uint8_t bg, int max_ok, double mean_ok) {
     int X, Y, worst = 0, wx = 0, wy = 0;
     double sum = 0;
@@ -101,7 +112,9 @@ static void check(const char *name, const rop *op, rview *v, uint8_t bg, int max
     draw(op, v);
     for (Y = v->y1; Y < v->y2; Y++)
         for (X = v->x1; X < v->x2; X++) {
-            int d = cdiff(out[Y * OW + X], ref_px(v, X, Y));
+            int d;
+            if (snapped_edge(op, v, X, Y)) continue;
+            d = cdiff(out[Y * OW + X], ref_px(v, X, Y));
             sum += d;
             if (d > worst) { worst = d; wx = X; wy = Y; }
         }
@@ -156,6 +169,51 @@ int main(void) {
             check("sprite copy", &op, &v, 9, 2, 0.6);
         }
     }
+    /* No seams: operations that meet (WA's sky gradient strips, the background's pieces, the land's tiles), here a grid
+     * of 9 x 7 fills and then of opaque one-colour bitmaps, each tiling the next, edges at fractions of a screen pixel,
+     * over another colour: every output pixel inside the grid is exactly the grid's colour (a friend's screenshot,
+     * 2026-11-22: dark lines where the background showed through between strips) */
+    for (k = 0; k < (int)(sizeof(zooms) / sizeof(zooms[0])); k++) {
+        static uint8_t solid[16 * 16];
+        double offs[3] = {0.0, 0.37, -1.61};
+        int o, kind;
+        memset(solid, 7, sizeof(solid));
+        if (zooms[k] * 7.0 < 1.0) continue;     /* (strips thinner than a screen pixel keep their shares: see raster.c) */
+        for (o = 0; o < 3; o++)
+            for (kind = 0; kind < 2; kind++) {
+                const double z = zooms[k];
+                int X, Y, worst = 0, wx = 0, wy = 0, gx, gy;
+                double ux1, ux2, uy1, uy2;
+                view(&v, z, 100 + offs[o], 80 + offs[o] * 0.7);
+                for (X = 0; X < OW * OH; X++) out[X] = pal[3];
+                for (gy = 0; gy < 7; gy++)
+                    for (gx = 0; gx < 9; gx++) {
+                        memset(&op, 0, sizeof(op));
+                        op.land_x = -1;
+                        op.l = 64 + gx * 9; op.r = op.l + 9; op.t = 50 + gy * 7; op.b = op.t + 7;
+                        if (kind == 0) { op.kind = ROP_FILL; op.index = 7; }
+                        else {
+                            op.kind = ROP_BITMAP; op.src.data = solid; op.src.w = 16; op.src.h = 16; op.src.stride = 16;
+                            op.col0 = -(int)op.l; op.dir = 1; op.row0 = -(int)op.t;
+                        }
+                        draw(&op, &v);
+                    }
+                ux1 = (64 - v.bx) * z + v.ox; ux2 = (64 + 81 - v.bx) * z + v.ox;
+                uy1 = (50 - v.by) * z + v.oy; uy2 = (50 + 49 - v.by) * z + v.oy;
+                for (Y = (int)ceil(uy1); Y < (int)floor(uy2); Y++)
+                    for (X = (int)ceil(ux1); X < (int)floor(ux2); X++) {
+                        int d;
+                        if (X < v.x1 || X >= v.x2 || Y < v.y1 || Y >= v.y2) continue;
+                        d = cdiff(out[Y * OW + X], pal[7]);
+                        if (d > worst) { worst = d; wx = X; wy = Y; }
+                    }
+                if (worst > 1) {
+                    printf("FAIL seam (%s) z=%.4f offset %d: worst %d at %d,%d (got %06x, want %06x)\n", kind ? "bitmaps" : "fills",
+                           z, o, worst, wx, wy, out[wy * OW + wx], pal[7]);
+                    failures++;
+                }
+            }
+    }
     /* the land: 128 x 96 in 32 x 32 tiles, drawn from its shrunk copies */
     for (y = 0; y < 96; y++)
         for (x = 0; x < 128; x++)
@@ -196,7 +254,16 @@ int main(void) {
                     }
                 for (Y = 0; Y < OH; Y++)
                     for (X = 0; X < OW; X++) {
-                        int d = cdiff(out[Y * OW + X], ref_px(&v, X, Y));
+                        int d, edge = 0;
+                        for (ty = 0; ty < 3 && !edge; ty++)          /* (the tiles' snapped edges: see check) */
+                            for (tx = 0; tx < 4 && !edge; tx++) {
+                                rop e;
+                                memset(&e, 0, sizeof(e));
+                                e.l = 16 + tx * 32; e.t = 16 + ty * 32; e.r = e.l + 32; e.b = e.t + 32;
+                                edge = snapped_edge(&e, &v, X, Y);
+                            }
+                        if (edge) continue;
+                        d = cdiff(out[Y * OW + X], ref_px(&v, X, Y));
                         sum += d;
                         if (d > worst) worst = d;
                     }

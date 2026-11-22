@@ -49,7 +49,8 @@
  * WKMAPZOOM_TEST_ESC=1 the Esc menu and its list opened (=options: its options, two of them clicked, not saved), WKMAPZOOM_TEST_FULLCOLOUR=1 made-up full colours for the land,
  * WKMAPZOOM_TEST_ZOOM=z one zoom all along (no zoom script), WKMAPZOOM_TEST_AUTOZOOM=1 the auto zoom on (its frames saved
  * every 10 s), WKMAPZOOM_TEST_TRACE=1 with it the worm's path (trace.csv) and the land (land-N.pgm) for working the auto
- * zoom out away from WA; a movement line's first two showings are saved too.
+ * zoom out away from WA, WKMAPZOOM_TEST_OPLOG=1 two frames' drawing calls logged (their kinds and sizes on the screen);
+ * a movement line's first two showings are saved too.
  * MinHook (third_party/minhook) is BSD licensed. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -692,6 +693,13 @@ static void draw_op(const rop *op) {
     LONGLONG t0 = qpc();
     if (!raster_prepare(op, &rv, &p)) { t_ops += qpc() - t0; return; }
     n_ops++;
+    if (test_mode && GetEnvironmentVariableA("WKMAPZOOM_TEST_OPLOG", NULL, 0) > 0 && (frames == 120 || frames == 300)) {
+        static int logged;                  /* (test: what one frame draws, for seams between operations) */
+        if (logged++ < 600)
+            say("test: op frame %u kind %d keyed %d land %d: %.2f,%.2f - %.2f,%.2f (%.2f x %.2f screen px at %.3f)", frames,
+                op->kind, op->kind == ROP_BITMAP ? op->keyed : -1, op->land_x >= 0, (double)op->l, (double)op->t,
+                (double)op->r, (double)op->b, (op->r - op->l) * rv.z, (op->b - op->t) * rv.z, rv.z);
+    }
     cost = (long)(p.x2 - p.x1) * (p.y2 - p.y1);
     if (op->kind != ROP_FILL && !p.level && rv.z < 1.0) cost = (long)(cost / (rv.z * rv.z));
     if (cost >= 32768) { job_op = op; job_prep = p; parallel_rows(op_rows, p.y1, p.y2, cost); }
@@ -2067,11 +2075,59 @@ static int runs_without_screen(void) {
 
 typedef struct { uint32_t va; const unsigned char *bytes; unsigned n; void *detour; void **orig; const char *name; } hook_def;
 
+/* Pins the module that holds addr (another WormKit module whose hook ours chains onto: if it were unloaded, our call
+ * into it would land in freed memory); WA itself, Windows' own DLLs and this module are left alone. */
+typedef BOOL (WINAPI *handle_ex_fn)(DWORD, LPCSTR, HMODULE *);   /* (GetModuleHandleExA: behind _WIN32_WINNT >= XP in
+                                                                    this MinGW's headers; flags PIN 1, UNCHANGED 2,
+                                                                    FROM_ADDRESS 4) */
+static handle_ex_fn handle_ex(void) {
+    return (handle_ex_fn)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetModuleHandleExA");
+}
+static void pin_owner(const void *addr, const char *what) {
+    const handle_ex_fn ex = handle_ex();
+    HMODULE m = NULL, pinned;
+    char name[MAX_PATH] = "", win[MAX_PATH] = "";
+    UINT wn;
+    if (!ex || !addr || !ex(0x2 | 0x4, (LPCSTR)addr, &m) || !m) return;
+    if ((uintptr_t)m == base || m == self || !GetModuleFileNameA(m, name, sizeof(name))) return;
+    wn = GetSystemWindowsDirectoryA(win, sizeof(win));
+    if (wn && wn < sizeof(win)) {           /* (Windows' own DLLs stay loaded anyway) */
+        UINT k;
+        for (k = 0; k < wn && name[k] && (name[k] | 0x20) == (win[k] | 0x20); k++) {}
+        if (k == wn) return;
+    }
+    if (ex(0x1 | 0x4, (LPCSTR)addr, &pinned)) say("%s chains on to %s: pinned too, so it stays loaded", what, name);
+}
+
+/* The camera follow (0054 2F70), hooked at WA's two calls of it (00554636 in the per-frame camera update, 0055A4B8), not
+ * at its start: another camera module may hook its start too (a friend's set had wkTrackMeBetter381) -- it then sees
+ * WA's own bytes there, not a jump of ours, and wkMapZoom no longer stands down because of it; our thunk goes on into
+ * whatever is at the start. A call another module has already redirected is left alone (logged). */
+static int follow_sites_install(void) {
+    static const uint32_t sites[2] = {0x554636u, 0x55a4b8u};
+    const uintptr_t target = VA(FOLLOW_VA);
+    int k, done = 0;
+    orig_follow = (void *)target;
+    for (k = 0; k < 2; k++) {
+        uint8_t *at = (uint8_t *)VA(sites[k]);
+        DWORD old;
+        if (at[0] != 0xe8 || (uintptr_t)(at + 5) + (uintptr_t)*(int32_t *)(at + 1) != target) {
+            say("WA's camera follow call at %08X goes elsewhere (another module's?): left alone", sites[k]);
+            continue;
+        }
+        if (!VirtualProtect(at + 1, 4, PAGE_EXECUTE_READWRITE, &old)) continue;
+        *(int32_t *)(at + 1) = (int32_t)((uintptr_t)(void *)thunk_follow - (uintptr_t)(at + 5));
+        VirtualProtect(at + 1, 4, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), at, 5);
+        done++;
+    }
+    return done;
+}
+
 static void install(void) {
     static const unsigned char render_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x20};
     static const unsigned char queue_bytes[] = {0x83, 0xec, 0x1c, 0x53, 0x55, 0x8b, 0x6c, 0x24, 0x28};
     static const unsigned char clamp_bytes[] = {0xc1, 0xe0, 0x10, 0x99, 0x2b, 0xc2, 0x53};
-    static const unsigned char follow_bytes[] = {0x51, 0xc1, 0xe0, 0x10, 0x99, 0x2b, 0xc2, 0x8b, 0xc8};
     static const unsigned char bitmap_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x24, 0x53, 0x56};
     static const unsigned char fill_bytes[] = {0x8b, 0x81, 0x60, 0x35, 0x00, 0x00, 0x01, 0x44, 0x24, 0x04};
     static const unsigned char grid_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x8b, 0x4d, 0x10, 0x8b, 0x45, 0x18};
@@ -2084,7 +2140,7 @@ static void install(void) {
         {GAME_RENDER_VA, render_bytes, sizeof(render_bytes), (void *)hook_render, (void **)&original_render, "GameRender"},
         {QUEUE_VA, queue_bytes, sizeof(queue_bytes), (void *)thunk_queue, &orig_queue, "RenderDrawingQueue"},
         {CLAMP_VA, clamp_bytes, sizeof(clamp_bytes), (void *)thunk_clamp, &orig_clamp, "the camera clamp"},
-        {FOLLOW_VA, follow_bytes, sizeof(follow_bytes), (void *)thunk_follow, &orig_follow, "the camera follow"},
+        /* (the camera follow: at its two calls, see follow_sites_install) */
         {BITMAP_VA, bitmap_bytes, sizeof(bitmap_bytes), (void *)thunk_bitmap, &orig_bitmap, "the bitmap blit"},
         {FILL_VA, fill_bytes, sizeof(fill_bytes), (void *)hook_fill, (void **)&original_fill, "the display fill"},
         {GRID_VA, grid_bytes, sizeof(grid_bytes), (void *)thunk_grid, &orig_grid, "the sprite blit"},
@@ -2120,7 +2176,21 @@ static void install(void) {
     }
     if (memcmp((void *)VA(QUEUE_ORDER_VA), order_bytes, sizeof(order_bytes))) { say("unexpected code at 00542330: not installed"); return; }
     if (taken) {
-        say("another module hooks WA's drawing too (wkVista or WormForge's zoom?): not installed -- use one zoom module at a time");
+        unsigned stale = 0;                 /* (jumps into memory with no code in it: a module unloaded with its hooks
+                                               still in WA -- the friend's crash, 2026-11-22) */
+        for (i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++) {
+            const uint8_t *at = (const uint8_t *)VA(hooks[i].va);
+            MEMORY_BASIC_INFORMATION mi;
+            if (*at == 0xe9 && VirtualQuery(at + 5 + *(const int32_t *)(at + 1), &mi, sizeof(mi)) &&
+                (mi.State != MEM_COMMIT || !(mi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))))
+                stale++;
+        }
+        if (stale)
+            say("%u of WA's functions still jump into a module that is no longer loaded (an earlier copy of wkMapZoom, "
+                "unloaded?): WA will crash there -- restart WA, and keep one copy of wkMapZoom", stale);
+        else
+            say("another module hooks WA's drawing too (another copy of wkMapZoom, wkVista or WormForge's zoom?): not installed "
+                "-- use one zoom module, and one copy of it, at a time");
         return;
     }
     read_settings(exe);
@@ -2152,6 +2222,18 @@ static void install(void) {
     }
     say("WA starts at %dx%d, %s, renderer %d (its options as read)", *(int32_t *)VA(OPT_DISPLAY_X_VA), *(int32_t *)VA(OPT_DISPLAY_Y_VA),
         *(int32_t *)VA(OPT_WINDOWED_VA) ? "windowed" : "fullscreen", *(int32_t *)VA(OPT_RENDERER_VA));
+    {   /* Pinned before any of WA's code or imports point into this DLL (its hooks, its CreateFile imports, its message
+         * hook), so it is never unloaded while WA runs. A friend's WA crashed (2026-11-22) with WA's camera follow
+         * jumping into a copy of this module that was no longer loaded (unloaded and loaded again by something; the
+         * copy loaded again took the old jumps for another zoom module's and stood down). Pinned, an unload is a no-op
+         * and a reload gets this very copy back, hooks and all. Not pinned, it doesn't install. */
+        const handle_ex_fn ex = handle_ex();
+        HMODULE me;
+        if (!ex || !ex(0x1 | 0x4, (LPCSTR)(void *)&install, &me)) {
+            say("could not pin the module in memory (error %lu): not installed", GetLastError());
+            return;
+        }
+    }
     s = MH_Initialize();
     for (i = 0; s == MH_OK && i < sizeof(hooks) / sizeof(hooks[0]); i++)
         if ((s = MH_CreateHook((void *)VA(hooks[i].va), hooks[i].detour, hooks[i].orig)) != MH_OK)
@@ -2161,6 +2243,12 @@ static void install(void) {
         strcpy(dir, exe);
         if ((slash = strrchr(dir, '\\')) != NULL) *slash = 0;
         if (colour_maps && !colourmap_install(base, dir, map_theme, say)) colour_maps = 0;
+        if (colour_maps) {                  /* (another module's CreateFile hook we chain onto: kept loaded) */
+            const void *a, *w;
+            colourmap_originals(&a, &w);
+            pin_owner(a, "the full-colour maps' CreateFileA");
+            pin_owner(w, "the full-colour maps' CreateFileW");
+        }
         {                                   /* (the team tasks: only on WA 3.8.1's own code, or another module's hook) */
             static const unsigned char team_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00};
             static const unsigned char physics_bytes[] = {0x83, 0xec, 0x08, 0x53, 0x8b, 0x5c, 0x24, 0x14};
@@ -2177,11 +2265,15 @@ static void install(void) {
                 say("the movement line and the auto zoom are unavailable");
             } else {
                 worms_ok = 1;
+                /* (another module's hook already there: ours chains onto it, so it is kept loaded) */
+                if (*tp == 0xe9) pin_owner(tp + 5 + *(const int32_t *)(tp + 1), "the team tasks' hook");
+                if (*pp == 0xe9) pin_owner(pp + 5 + *(const int32_t *)(pp + 1), "the physics step's hook");
             }
         }
         if (esc_menu && !escmenu_install(base, say, !test_mode)) esc_menu = 0;
         if (esc_menu) escmenu_set_options(&menu_options);
         s = MH_EnableHook(MH_ALL_HOOKS);
+        if (s == MH_OK && follow_sites_install() < 2) say("the zoomed-in camera follow works at some of WA's calls only");
     }
     installed = s == MH_OK;
     if (installed) {
@@ -2194,14 +2286,21 @@ static void install(void) {
         numpad_keys ? ", numpad + / - / *" : "", tc_ok ? "on (Direct3D 9)" : "off", colour_maps ? "on" : "off",
         esc_menu ? "on" : "off", trail_on ? (trail_all ? "on (whole game)" : "on (last turn)") : "off",
         worms_ok ? (auto_zoom ? "on (Ctrl + A switches it)" : "off (Ctrl + A switches it)") : "unavailable");
+    {   /* (which file this is, and where it lies: two copies, or one unloaded, show in the log) */
+        char me[MAX_PATH] = "";
+        GetModuleFileNameA(self, me, sizeof(me));
+        say("this module: %s at %08x, pinned (it stays loaded until WA exits)", me, (unsigned)(uintptr_t)self);
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE dll, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) { self = dll; DisableThreadLibraryCalls(dll); install(); }
-    else if (reason == DLL_PROCESS_DETACH) {
+    else if (reason == DLL_PROCESS_DETACH) {   /* (pinned: only at WA's exit, the hooks still live -- so no say() after) */
         if (msg_hook) UnhookWindowsHookEx(msg_hook);
+        msg_hook = NULL;
         if (log_file) fclose(log_file);
+        log_file = NULL;
     }
     return TRUE;
 }

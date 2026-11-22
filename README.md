@@ -82,8 +82,12 @@ Uninstall: delete `wkMapZoom.dll`.
   colours (still averaged).
 - Choosing a resolution in the Esc menu saves it as WA's own setting, so the next game starts with it.
 - Don't run it together with another zoom module (wkZoom, wkVista, WormForge's zoom): they all take over WA's map
-  drawing (wkMapZoom refuses to start when it finds another one's hooks). Keep one zoom module in the WA folder at a time.
-- Log: `%LOCALAPPDATA%\wkMapZoom\wkMapZoom.log`.
+  drawing (wkMapZoom refuses to start when it finds another one's hooks). Keep one zoom module in the WA folder at a time,
+  and one copy of wkMapZoom (renamed copies included).
+- Once WA has loaded it, the module stays loaded until WA exits, so a module that unloads or reloads WormKit modules
+  can't pull it out from under WA's code. A new `wkMapZoom.dll` takes effect at WA's next start.
+- Log: `%LOCALAPPDATA%\wkMapZoom\wkMapZoom.log` (it names the module's file and where it was loaded; send it along with
+  WA's `ERRORLOG.TXT` if WA crashes).
 
 ## Settings (`wkMapZoom.ini`, all optional)
 

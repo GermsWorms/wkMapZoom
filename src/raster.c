@@ -66,6 +66,23 @@ static void tap_one(rtap *t, int p, int o, double b, double z, double lo, double
     t->sum = (int16_t)(prev > 256 ? 256 : prev);
 }
 
+/* a snapped edge pixel's tap: its weights scaled to add up to 256 (all of the pixel, its colour the average of the part
+ * the operation covers) */
+static void tap_whole(rtap *t) {
+    int k, sum = 0, prev = 0;
+    double cum = 0.0;
+    for (k = 0; k < t->n; k++) sum += t->w[k];
+    if (sum <= 0 || sum >= 256) return;
+    for (k = 0; k < t->n; k++) {
+        int w;
+        cum += t->w[k] * 256.0 / sum;
+        w = (int)floor(cum + 0.5) - prev;
+        prev += w;
+        t->w[k] = (int16_t)w;
+    }
+    t->sum = 256;
+}
+
 void raster_axis(rtap *t, int p0, int p1, int o, double b, double z, double off, int level, int point) {
     int p;
     for (p = p0; p < p1; p++) tap_one(t + (p - p0), p, o, b, z, -1e18, 1e18, off, 1 << level, point);
@@ -80,13 +97,21 @@ int raster_level(const rland *L, double z) {
 
 int raster_prepare(const rop *op, const rview *v, rprep *p) {
     const double z = v->z;
+    const double fx1 = (op->l - v->bx) * z + v->ox, fx2 = (op->r - v->bx) * z + v->ox;
+    const double fy1 = (op->t - v->by) * z + v->oy, fy2 = (op->b - v->by) * z + v->oy;
+    /* Edges at least a pixel apart are snapped to whole output pixels: an edge pixel is all the operation's or none of
+     * it. Blending each edge pixel by the share an operation covers let what was under it show through where two
+     * operations meet (A over B over what was there: c(1 - c) of it left), a dark line between the sky gradient's
+     * strips, the background's pieces and the land's tiles (a friend's screenshot, 2026-11-22). Thinner than a pixel
+     * along an axis, an operation keeps its share there, so thin lines stay visible zoomed out. */
+    const int snapx = !v->point && fx2 - fx1 >= 1.0, snapy = !v->point && fy2 - fy1 >= 1.0;
     double offx = 0.0, offy = 0.0;
     int level = 0, S;
     if (op->r <= op->l || op->b <= op->t || !v->gx[0] || !v->gy[0]) return 0;
-    p->x1 = (int)floor((op->l - v->bx) * z + v->ox);
-    p->x2 = (int)ceil((op->r - v->bx) * z + v->ox);
-    p->y1 = (int)floor((op->t - v->by) * z + v->oy);
-    p->y2 = (int)ceil((op->b - v->by) * z + v->oy);
+    p->x1 = snapx ? (int)floor(fx1 + 0.5) : (int)floor(fx1);
+    p->x2 = snapx ? (int)floor(fx2 + 0.5) : (int)ceil(fx2);
+    p->y1 = snapy ? (int)floor(fy1 + 0.5) : (int)floor(fy1);
+    p->y2 = snapy ? (int)floor(fy2 + 0.5) : (int)ceil(fy2);
     if (p->x1 < v->x1) p->x1 = v->x1;
     if (p->y1 < v->y1) p->y1 = v->y1;
     if (p->x2 > v->x2) p->x2 = v->x2;
@@ -108,6 +133,8 @@ int raster_prepare(const rop *op, const rview *v, rprep *p) {
     tap_one(&p->ex[1], p->x2 - 1, v->ox, v->bx, z, op->l, op->r, offx, S, v->point);
     tap_one(&p->ey[0], p->y1, v->oy, v->by, z, op->t, op->b, offy, S, v->point);
     tap_one(&p->ey[1], p->y2 - 1, v->oy, v->by, z, op->t, op->b, offy, S, v->point);
+    if (snapx) { tap_whole(&p->ex[0]); tap_whole(&p->ex[1]); }
+    if (snapy) { tap_whole(&p->ey[0]); tap_whole(&p->ey[1]); }
     if (level) {
         p->xbase = 0; p->xdir = 1; p->xn = v->land->mw[level];
         p->ybase = 0; p->yn = v->land->mh[level];
