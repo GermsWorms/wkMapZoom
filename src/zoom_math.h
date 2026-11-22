@@ -85,7 +85,7 @@ static void zoom_region(int cx1, int cy1, int cx2, int cy2, int ox, int oy, doub
 }
 
 /* the buffer column (or row) screen pixel p shows: nearest, kept inside [0, r) */
-static int zoom_src(int p, int o, int b, double z, int r) {
+static inline int zoom_src(int p, int o, int b, double z, int r) {
     int q = (int)floor(b + (p + 0.5 - o) / z);
     return q < 0 ? 0 : q >= r ? r - 1 : q;
 }

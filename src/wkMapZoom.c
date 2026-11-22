@@ -1,47 +1,56 @@
-/* wkMapZoom: hold Ctrl and turn the mouse wheel to zoom the map in and out in Worms Armageddon 3.8.1 (a WormKit module).
- * The HUD, the chat, the Esc menu and the weapon panel stay their normal size; a small "150%" shows while you zoom.
+/* wkMapZoom: hold Ctrl and turn the mouse wheel (or numpad + / -) to zoom the map in and out in Worms Armageddon 3.8.1
+ * (a WormKit module). The HUD, the chat, the Esc menu and the weapon panel stay their normal size; a small "150%" shows
+ * while you zoom. Also: true colour on WA's Direct3D 9 renderers, full-colour PNG / JPEG maps (colourmap.c), a
+ * Resolution dropdown and Fullscreen / Windowed switch in WA's Esc menu (escmenu.c), and the movement line (where the
+ * worm whose turn starts went before, in red, until it moves).
  *
  * How it works. Each frame WA's GameRender (00533DC0) has its tasks queue what they draw (the drawing queue, world
  * +0x524) and then draws the queue back to front (RenderDrawingQueue 00542350). Entries of kinds 1, 4 and 7 are placed
- * on the screen (the HUD); every other kind goes through the camera (the world: sky, land, water, worms, weapons,
- * names). While zoomed, this module has WA draw the queue one entry at a time (the split wkVista makes, MIT,
- * github.com/ropahektic/wkVista): for the world entries the display's frame grid, size, origin and clip point at a
- * bigger buffer of the module's own, so WA draws -- at its own scale, with its own code -- the whole area the zoomed
- * view needs (the renderer's frame pointer and size too, which WA's fills and land tiles draw into); at the first HUD
- * entry the module scales that area onto WA's frame (Filter=); WA's big rectangle fills (sky, water) and the buffer's
- * clearing are done by helper threads meanwhile. Everything on the map zooms with it, worm names and the turn arrow
- * included. Everything else is WA's own, at the game resolution: the HUD entries (team bars, timer, wind), the chat, the
- * Esc menu and the weapon panel (drawn after the queue). WA's camera clamp (00542F10) is given the size the zoomed view sees, so the camera reaches the level's edges
- * zoomed in. The readout is drawn into WA's frame at the end of GameRender, in WA's own palette. Only what is shown
- * changes -- no game state, nothing in WA's display or renderer setup -- so online games and replays stay in step, any
- * renderer works and a resolution change in game is WA's own (the module follows the new size the next frame).
+ * on the screen (the HUD); every other kind goes through the camera (the map: sky, land, water, worms, weapons, names).
+ * While zoomed, the module has WA draw the queue one entry at a time (the split wkVista makes, MIT, Copyright (c) 2026
+ * ropahektic, github.com/ropahektic/wkVista). For the map entries the display's size, origin and clip describe the
+ * whole area the zoomed view needs (the "region": at 25% four times the screen each way), so WA's own code works out
+ * everything that is to be drawn there -- and each drawing call it makes (WA's bitmap blit, rectangle fills, sprite
+ * blits, pixels, lines: the seven functions wkVista draws through) is drawn by the module straight onto the screen at
+ * the zoom, each screen pixel the average of the map pixels it covers (raster.c). WA's land tiles come from shrunk
+ * copies kept up to date with the land, so zoomed out the land costs about what it costs at 100%. The map ends up in
+ * an RGB picture: it goes into WA's 8-bit frame as the nearest palette colours, then WA draws the HUD entries on top as
+ * ever, and on a Direct3D 9 renderer the frame is shown in true colour (present.c; the map's pixels as averaged, the
+ * HUD's as WA drew them). WA's camera clamp (00542F10) is given the size the zoomed view sees, so the camera reaches the
+ * level's edges zoomed in, and WA's camera follow (00542F70) the zoomed-in view's size, so the camera keeps up with the
+ * worm (at 100% and below it follows as ever). Only what is shown changes -- no game state -- so online games and
+ * replays stay in step, and other players don't need the module.
  *
  * Hooks (WA 3.8.1 only: exact SHA-256 of WA.exe and the original bytes checked at each hook point):
  *   00533DC0 GameRender (ECX the runtime; ret): the frame's zoom, then the readout
- *   00542350 RenderDrawingQueue (EAX the queue; display, camera; ret 8): world entries into the module's buffer
+ *   00542350 RenderDrawingQueue (EAX the queue; display, camera; ret 8): the map entries, then the HUD entries
+ *   0056A700 DisplayGfx::BlitBitmapClipped (EAX display, EDX width; x, y, height, bitmap, flags; ret 0x14)
+ *   0056B810 the display's rectangle fill (ECX display; x1, y1, x2, y2 from its origin, colour; ret 0x14)
+ *   004F6910 BitGrid::BlitSpriteRect (ESI target; x, y, w, h, source, sx, sy, blend table, mode; ret 0x24)
+ *   004F9180 / 004F5E40 BitGrid pixel, clipped / not (ECX grid; x, y, colour; ret 0xC)
+ *   004F9110 BitGrid vertical line (ECX grid; x, y1, y2, colour; ret 0x10)
+ *   004F5D50 BitGrid rectangle fill (ECX grid; x1, y1, x2, y2, colour; ret 0x14)
  *   00542F10 ClampCameraToBounds (EAX view width, ECX bottom; context, view height, left, top, right; ret 0x14)
- *   a WH_GETMESSAGE hook on WA's own thread: Ctrl + wheel (taken out of WA's queue), Ctrl + middle click: back to 100%
+ *   00542F70 the camera follow (EAX half the view's width, EDI the camera; half its height, the box it follows)
+ *   00557310 a team task's message handler, 004FCDF0 an object's physics step: the movement line (they only look)
+ *   a WH_GETMESSAGE hook on WA's own thread: Ctrl + wheel, numpad + / - / *, Ctrl + middle click (taken out of WA's
+ *   queue); and present.c, colourmap.c, escmenu.c's own
  *
- * Settings (all optional) in wkMapZoom.ini beside WA.exe:
- *   [wkMapZoom]
- *   MaxOut=4        how far out: 4 (25%) shows four times the width and height of the map (the module's buffer is 4x
- *                   the game resolution each way; WA draws up to 16x the map pixels zoomed all the way out)
- *   MaxIn=8         how far in (800%)
- *   Step=1.15       zoom per wheel notch
- *   Smooth=1        ease to the new zoom (0: jump at once)
- *   Filter=smooth   how the zoomed map is scaled: smooth (each screen pixel the average of the map pixels it covers,
- *                   in WA's palette: clear zoomed out, even pixels zoomed in) or nearest (plain pixel picking)
- *   Indicator=zooming  the readout ("150%"): shown while zooming, then fades ("always": stays while not at 100%;
- *                   "off": never)
- *   IndicatorPlace=top-right   or top-left, top, bottom-right, bottom-left, bottom
+ * Settings (all optional) in wkMapZoom.ini beside WA.exe, section [wkMapZoom]: MaxOut, MaxIn, Step, Smooth, Filter,
+ * Indicator, IndicatorPlace, NumpadKeys, TrueColour, ColourMaps, MapTheme, EscMenu, TurnLine
+ * (see the README).
  * Log: %LOCALAPPDATA%\wkMapZoom\wkMapZoom.log.
  *
  * Test mode (environment WKMAPZOOM_TEST=1, for an isolated copy of WA only): the in-memory options become windowed
  * 960x540 on Direct3D 9 -- the registry is not written -- and a scripted zoom runs (100% -> farthest out -> closest in
  * -> 100%) with WA's frame saved as BMP files (WKMAPZOOM_DUMP, else %LOCALAPPDATA%\wkMapZoom\test); WKMAPZOOM_TEST_RES=WxH
- * sets the window size. MinHook (third_party/minhook) is BSD licensed. */
+ * sets the window size, WKMAPZOOM_TEST_SWITCH=WxH a resolution switched to through the Esc menu's code (not saved),
+ * WKMAPZOOM_TEST_ESC=1 the Esc menu and its list opened, WKMAPZOOM_TEST_FULLCOLOUR=1 made-up full colours for the land,
+ * WKMAPZOOM_TEST_ZOOM=z one zoom all along (no zoom script); a movement line's first two showings are saved too.
+ * MinHook (third_party/minhook) is BSD licensed. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -52,6 +61,10 @@
 #include "image_guard.h"
 #include "zoom_math.h"
 #include "zoom_badge.h"
+#include "raster.h"
+#include "present.h"
+#include "colourmap.h"
+#include "escmenu.h"
 
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020a
@@ -69,15 +82,25 @@
 #define WA_BASE 0x400000u
 #define GAME_RENDER_VA 0x533dc0u
 #define QUEUE_VA 0x542350u
-#define FILL_VA 0x56b810u                /* the display rectangle fill (ECX display; x1, y1, x2, y2 from its origin,
-                                           colour; ret 0x14) */
 #define CLAMP_VA 0x542f10u
+#define FOLLOW_VA 0x542f70u
+#define BITMAP_VA 0x56a700u
+#define FILL_VA 0x56b810u
+#define GRID_VA 0x4f6910u
+#define PIXEL_CLIPPED_VA 0x4f9180u
+#define PIXEL_VA 0x4f5e40u
+#define VLINE_VA 0x4f9110u
+#define GRID_FILL_VA 0x4f5d50u
+#define TEAM_HANDLER_VA 0x557310u       /* a team task's message handler (thiscall, ECX the task) */
+#define PHYSICS_VA 0x4fcdf0u            /* an object's physics step (its manager, the object; every object, every step) */
+#define WORM_VTABLE_VA 0x6644c8u        /* a worm: +0x2C the game, +0x84 / +0x88 its place (1/65536 px), +0xFC its team,
+                                           +0x100 its number in the team */
 #define QSORT_VA 0x5d7890u              /* WA's qsort (cdecl) */
 #define QUEUE_ORDER_VA 0x542330u        /* the queue's order (by layer: +4) */
 #define DISPLAY_VTABLE_VA 0x66a218u     /* the game display (DDDisplay) */
 #define FRAME_PTR_VA 0x7a0eecu          /* the renderer's 8-bit frame: its pixels, width (= row stride), height. The display
                                            takes its grid from these at each lock (0056A370), and its fills (0056B810 ->
-                                           005A25C0) and land tiles draw into them directly */
+                                           005A25C0) and bitmap blits draw into them directly */
 #define FRAME_W_VA 0x7a0ef0u
 #define FRAME_H_VA 0x7a0ef4u
 #define OPT_DISPLAY_X_VA 0x88e3b8u      /* the options as read at start-up (004C8440, before the modules load) */
@@ -95,7 +118,13 @@
 #define D_ORG 0x3560
 #define D_PALETTE 0x358d                /* 256 x R, G, B, flags */
 #define D_GRID 0x3d9c
-#define GR_DATA 0x08                    /* the frame grid (BitGrid): its pixels, row stride, size, clip */
+#define D_TERRAIN 0x4dd8                /* the land: an object whose +4 is its tile bitmaps row by row; the land's size, a */
+#define D_LAND_W 0x4ddc                 /* tile's size (wkVista, land.rs) */
+#define D_LAND_H 0x4de0
+#define D_TILE_W 0x4de4
+#define D_TILE_H 0x4de8
+#define GR_DATA 0x08                    /* a BitGrid: its pixels, bits a pixel, row stride, size, clip */
+#define GR_BPP 0x0c
 #define GR_STRIDE 0x10
 #define GR_W 0x14
 #define GR_H 0x18
@@ -103,6 +132,8 @@
 #define Q_COUNT 0x10004                 /* the drawing queue: its count and its entries (each: kind, layer, ...) */
 #define Q_ENTRIES 0x10008
 #define MAX_ENTRIES 16384
+#define SENT 0xff                       /* the region buffer's "nothing drawn" (for WA's own drawing of what the module
+                                           doesn't draw itself) */
 
 #define VA(a) ((uintptr_t)(base + ((uintptr_t)(a) - WA_BASE)))
 #define FIELD(p, off) (*(int32_t *)((char *)(p) + (off)))
@@ -110,30 +141,53 @@
 
 static uintptr_t base;
 static FILE *log_file;
-static int installed, test_mode;
+static int installed, test_mode, test_fullcolour, test_esc;
 static char dump_dir[MAX_PATH];
 static HINSTANCE self;
 static zoom_cfg cfg = ZOOM_CFG_DEFAULT;
 
-/* the game resolution S (the display's own size), the module's world buffer G */
+/* the game resolution S (the display's own size); the region buffer G (what WA's own drawing reaches while the map is
+ * drawn: normally nothing); the map as drawn this frame (RGB, S) */
 static int sw, sh, gw, gh;
 static uint8_t *wbuf;
-static int *colmap;                     /* screen column -> buffer column, this frame */
-#define MAX_TAPS 10                     /* buffer pixels one screen pixel covers, each way (1 / zoom + 1, and 2) */
-typedef struct { int n, i[MAX_TAPS]; uint16_t w[MAX_TAPS]; } tap;   /* buffer pixels and their weights (sum 256) */
-static tap *coltaps, *rowtaps;
-static uint32_t *lut;                   /* (palette generation << 8) | index, by 15-bit colour */
-static uint32_t lut_gen = 1;
-static uint8_t pal_rgb[256][3], lut_pal[1024];   /* (lut_pal: WA's palette as the table was made for it) */
-static int filter_smooth = 1;          /* Filter=smooth (else nearest) */
+static uint32_t *rgb;
+#define MAX_HELPERS 15
+static rtap *frame_tx[RASTER_LEVELS + 1], *frame_ty[RASTER_LEVELS + 1];   /* the frame's taps per level (raster.h) */
+static uint32_t *lut;                   /* (palette generation << 8) | index, by 18-bit colour */
+static uint32_t lut_gen = 1, pal_gen = 1, pal32[256];
+static uint8_t lut_pal[1024];           /* WA's palette as the tables were made for it */
+static uint32_t ex_key[1024];           /* the palette's own colours (1 << 24 | colour) -> their index: exact */
+static uint8_t ex_idx[1024];
+static int filter_smooth = 1, numpad_keys = 1, true_colour = 1, colour_maps = 1, esc_menu = 1, map_theme = 11;
+static int tc_ok;                       /* the true-colour hooks are on */
 static double zoom_now = 1.0, zoom_goal = 1.0, zoom_lo = 1.0, zoom_hi = 1.0;
 static double frame_zoom = 1.0;         /* the zoom this frame is drawn at (fixed at GameRender's start) */
-static void *frame_display, *last_world;
+static void *frame_display, *last_world, *frame_grid;
 static LARGE_INTEGER clock_freq, clock_last;
 static DWORD live_tick;                 /* GetTickCount of the last GameRender */
 static unsigned frames;                 /* GameRenders this game */
 static HHOOK msg_hook;
 static unsigned logged_split;
+
+/* the map drawing this frame */
+static rview rv;
+static int world_mode, rw_now, rh_now;
+static struct { int on, x1, y1, x2, y2; } tc;   /* this frame's map pixels [x1, x2) x [y1, y2) are rgb's */
+static struct { int on, l, t, r, b; } pend;    /* WA's own drawing of an operation into the region buffer, to copy */
+static unsigned n_ops, n_land, n_refused, n_refused_logged;
+static LONGLONG t_sync, t_land, t_ops;      /* this frame's time in the land copies' upkeep, the land, the other calls */
+static LONGLONG qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+
+/* the land */
+typedef struct { uintptr_t bm; int x, y; } tile_ref;
+static rland land;
+static tile_ref *tiles;
+static int ntiles, land_ok;
+static void *land_terrain;
+static uint8_t *land_snap;
+static uint32_t *land_full;
+static rop *batch;                      /* land tiles waiting to be drawn together */
+static int nbatch, cap_batch;
 
 /* the readout */
 enum { IND_OFF, IND_ZOOMING, IND_ALWAYS };
@@ -141,13 +195,33 @@ static int ind_mode = IND_ZOOMING;
 enum { PLACE_TOP_RIGHT, PLACE_TOP_LEFT, PLACE_TOP, PLACE_BOTTOM_RIGHT, PLACE_BOTTOM_LEFT, PLACE_BOTTOM };
 static int ind_place = PLACE_TOP_RIGHT;
 static DWORD ind_changed;               /* GetTickCount of the last zoom change */
-static uint32_t *ind_img;               /* the readout's picture (ARGB, ind_tw x ind_th) for ind_pct */
+static uint32_t *ind_img;               /* the readout's picture (ARGB, ind_tw x ind_th) for ind_text */
 static int ind_tw, ind_th, ind_bw, ind_bh, ind_pct = -1, ind_lines;
+static char ind_text[48];               /* the picture's text */
+
+
+/* the movement line: where each worm went this game (TurnLine=all) or in its last turn (TurnLine=last), shown when its
+ * turn starts */
+#define TRAIL_TEAMS 16
+#define TRAIL_PER_TEAM 16
+#define TRAIL_WORMS 64
+#define TRAIL_MAX 32768
+typedef struct { float x, y; int32_t turn; int16_t brk, own; } tpoint;   /* turn: the game's turn it was in; brk: not
+                                                               joined to the point before (a jump); own: in the worm's own
+                                                               turn (or right after it, before the next team's) */
+typedef struct { tpoint *pt; int n, cap; } team_trail;
+static team_trail *trails;              /* by worm: its team (a team task's +0x38) * TRAIL_PER_TEAM + its number in it */
+static uintptr_t team_tasks[TRAIL_TEAMS], worm_objs[TRAIL_WORMS];
+static int team_flags[TRAIL_TEAMS], n_team_tasks, n_worm_objs, trail_on = 1, trail_all = 1, trail_show = -1, trail_hl;
+static int trail_have0, trail_multi, trail_owner = -1, trail_visible, trail_turn;
+static double trail_x0, trail_y0;
 static uint8_t pal_seen[1024], dark_lut[256];
 static int white_index = -1;
 
 static void (__fastcall *original_render)(void *);
-void *orig_queue, *orig_clamp;          /* (read by the thunks below) */
+static void (__fastcall *original_fill)(void *, int, int, int, int, int, int);
+void *orig_team, *orig_physics, *orig_queue, *orig_clamp, *orig_follow, *orig_bitmap, *orig_grid, *orig_pixel_clipped, *orig_pixel, *orig_vline,
+     *orig_grid_fill;                   /* (read by the thunks below) */
 
 static void say(const char *fmt, ...) {
     va_list ap;
@@ -165,9 +239,43 @@ static void say(const char *fmt, ...) {
 /* ---- the thunks: WA's own conventions <-> C ---------------------------------------------------------------------- */
 int __cdecl queue_hook(uint8_t *queue, void *display, void *camera);
 void __cdecl clamp_hook(uint32_t *regs);
+void __cdecl follow_hook(uint32_t *regs);
+int __cdecl h_bitmap(uint32_t *r);
+int __cdecl h_grid(uint32_t *r);
+int __cdecl h_pixel_clipped(uint32_t *r);
+int __cdecl h_pixel(uint32_t *r);
+int __cdecl h_vline(uint32_t *r);
+int __cdecl h_grid_fill(uint32_t *r);
 void thunk_queue(void);
 void thunk_clamp(void);
+void thunk_follow(void);
+void thunk_team(void);
+void thunk_physics(void);
+void __cdecl team_seen(uint32_t task);
+void __cdecl worm_seen(uint32_t obj);
+static void trail_draw(const int32_t *camera);
+void thunk_bitmap(void);
+void thunk_grid(void);
+void thunk_pixel_clipped(void);
+void thunk_pixel(void);
+void thunk_vline(void);
+void thunk_grid_fill(void);
 int __cdecl call_queue(void *queue, void *display, void *camera);
+/* A drawing hook: the registers saved (pushal: edi esi ebp esp ebx edx ecx eax, then the return address and the stack
+ * arguments) and handed to the handler; 1: handled (the registers as the handler left them, then ret N), 0: WA's own
+ * function runs, untouched. */
+#define DRAW_THUNK(name, ret)                                                                                          \
+    ".globl _thunk_" name "\n"                                                                                          \
+    "_thunk_" name ":\n"                                                                                                \
+    "    pushal\n"                                                                                                      \
+    "    pushl %esp\n"                                                                                                  \
+    "    call _h_" name "\n"                                                                                            \
+    "    addl $4, %esp\n"                                                                                               \
+    "    testl %eax, %eax\n"                                                                                            \
+    "    popal\n"                                                                                                       \
+    "    jnz 1f\n"                                                                                                      \
+    "    jmp *_orig_" name "\n"                                                                                         \
+    "1:  ret $" ret "\n"
 __asm__(
     ".text\n"
     /* RenderDrawingQueue's entry: EAX the queue, [esp+4] the display, [esp+8] the camera; ret 8 */
@@ -195,8 +303,8 @@ __asm__(
     "    popl %esi\n"
     "    popl %ebx\n"
     "    ret\n"
-    /* ClampCameraToBounds: the registers and arguments handed to clamp_hook (which may change EAX and the view
-     * height), then WA's own with them */
+    /* ClampCameraToBounds and the camera follow: the registers and arguments handed to C (which may change them),
+     * then WA's own with them */
     ".globl _thunk_clamp\n"
     "_thunk_clamp:\n"
     "    pushal\n"
@@ -204,7 +312,56 @@ __asm__(
     "    call _clamp_hook\n"
     "    addl $4, %esp\n"
     "    popal\n"
-    "    jmp *_orig_clamp\n");
+    "    jmp *_orig_clamp\n"
+    ".globl _thunk_follow\n"
+    "_thunk_follow:\n"
+    "    pushal\n"
+    "    pushl %esp\n"
+    "    call _follow_hook\n"
+    "    addl $4, %esp\n"
+    "    popal\n"
+    "    jmp *_orig_follow\n"
+    /* a team task's message handler: the task noted (observe only: flags, registers and the x87 / SSE state kept, as
+     * the WAI module's own hook here) */
+    ".globl _thunk_team\n"
+    "_thunk_team:\n"
+    "    pushfl\n"
+    "    pushal\n"
+    "    movl %esp, %ebp\n"
+    "    subl $544, %esp\n"
+    "    andl $-16, %esp\n"
+    "    fxsave 16(%esp)\n"
+    "    pushl %ecx\n"
+    "    call _team_seen\n"
+    "    addl $4, %esp\n"
+    "    fxrstor 16(%esp)\n"
+    "    movl %ebp, %esp\n"
+    "    popal\n"
+    "    popfl\n"
+    "    jmp *_orig_team\n"
+    /* an object's physics step: worms noted (observe only, as above; the object is the second stack argument) */
+    ".globl _thunk_physics\n"
+    "_thunk_physics:\n"
+    "    pushfl\n"
+    "    pushal\n"
+    "    movl %esp, %ebp\n"
+    "    subl $544, %esp\n"
+    "    andl $-16, %esp\n"
+    "    fxsave 16(%esp)\n"
+    "    pushl 44(%ebp)\n"
+    "    call _worm_seen\n"
+    "    addl $4, %esp\n"
+    "    fxrstor 16(%esp)\n"
+    "    movl %ebp, %esp\n"
+    "    popal\n"
+    "    popfl\n"
+    "    jmp *_orig_physics\n"
+    DRAW_THUNK("bitmap", "0x14")
+    DRAW_THUNK("grid", "0x24")
+    DRAW_THUNK("pixel_clipped", "0xc")
+    DRAW_THUNK("pixel", "0xc")
+    DRAW_THUNK("vline", "0x10")
+    DRAW_THUNK("grid_fill", "0x14"));
 
 /* ---- the zoom ---------------------------------------------------------------------------------------------------- */
 static void set_goal(double z, const char *why) {
@@ -224,22 +381,33 @@ static void advance(void) {
     zoom_now = cfg.smooth ? zoom_ease(zoom_now, zoom_goal, dt) : zoom_goal;
 }
 
-/* the game resolution seen (a new game, or a resolution change): the world buffer and the zoom range for it */
+static void free_buffers(void) {
+    int k;
+    free(wbuf); free(rgb);
+    wbuf = NULL; rgb = NULL;
+    for (k = 0; k <= RASTER_LEVELS; k++) { free(frame_tx[k]); free(frame_ty[k]); frame_tx[k] = frame_ty[k] = NULL; }
+}
+
+/* the game resolution seen (a new game, or a resolution change): the buffers and the zoom range for it */
 static int fit_size(int w, int h) {
-    int nw, nh;
+    int nw, nh, k, ok;
     if (w < 64 || h < 64 || w > 16384 || h > 16384) return 0;
     if (w == sw && h == sh && wbuf) return 1;
     zoom_frame(w, h, cfg.max_out, &nw, &nh);
-    free(wbuf); free(colmap); free(coltaps); free(rowtaps);
+    free_buffers();
     wbuf = (uint8_t *)malloc((size_t)nw * nh);
-    colmap = (int *)malloc(sizeof(int) * (size_t)w);
-    coltaps = (tap *)malloc(sizeof(tap) * (size_t)w);
-    rowtaps = (tap *)malloc(sizeof(tap) * (size_t)h);
-    if (!lut) lut = (uint32_t *)calloc(32768, sizeof(uint32_t));
-    if (!wbuf || !colmap || !coltaps || !rowtaps) {
-        free(wbuf); free(colmap); free(coltaps); free(rowtaps);
-        wbuf = NULL; colmap = NULL; coltaps = rowtaps = NULL; sw = sh = 0;
-        say("no memory for a %dx%d world buffer: no zoom", nw, nh);
+    rgb = (uint32_t *)malloc((size_t)w * h * 4);
+    if (!lut) lut = (uint32_t *)calloc(1u << 18, sizeof(uint32_t));
+    ok = wbuf && rgb && lut;
+    for (k = 0; ok && k <= RASTER_LEVELS; k++) {
+        frame_tx[k] = (rtap *)malloc(sizeof(rtap) * (size_t)w);
+        frame_ty[k] = (rtap *)malloc(sizeof(rtap) * (size_t)h);
+        ok = frame_tx[k] && frame_ty[k];
+    }
+    if (!ok) {
+        free_buffers();
+        sw = sh = 0;
+        say("no memory for a %dx%d region buffer: no zoom", nw, nh);
         return 0;
     }
     sw = w; sh = h; gw = nw; gh = nh;
@@ -247,11 +415,12 @@ static int fit_size(int w, int h) {
     zoom_goal = zoom_clamp(zoom_goal, zoom_lo, zoom_hi);
     zoom_now = zoom_clamp(zoom_now, zoom_lo, zoom_hi);
     ind_pct = -1;
-    say("game %dx%d: world buffer %dx%d, zoom %.0f%% .. %.0f%%", sw, sh, gw, gh, zoom_lo * 100.0, zoom_hi * 100.0);
+    ind_text[0] = 0;
+    say("game %dx%d: region buffer %dx%d, zoom %.0f%% .. %.0f%%", sw, sh, gw, gh, zoom_lo * 100.0, zoom_hi * 100.0);
     return 1;
 }
 
-/* ---- the drawing queue: the world through the module's buffer ---------------------------------------------------- */
+/* ---- the display's view ------------------------------------------------------------------------------------------ */
 typedef struct {
     int32_t w, h, clip[4], org[2];          /* the display's */
     int32_t data, stride, gw, gh, gclip[4]; /* its frame grid's */
@@ -280,141 +449,20 @@ static void view_load(void *d, const view_state *s) {
     *(int32_t *)VA(FRAME_PTR_VA) = s->fb; *(int32_t *)VA(FRAME_W_VA) = s->fbw; *(int32_t *)VA(FRAME_H_VA) = s->fbh;
 }
 
-/* ---- the world onto WA's frame, scaled --------------------------------------------------------------------------- */
-/* Filter=smooth (the default): each screen pixel is the average colour of the world pixels it covers (exact coverage:
- * up to 3 x 3 of them zoomed out, 2 x 2 zoomed in), as the nearest colour of WA's palette -- zoomed out nothing is
- * skipped (thin lines and the rope stay), zoomed in every world pixel shows the same size. A pixel whose world pixels
- * are all one colour keeps that exact colour. Filter=nearest: the world pixel under each screen pixel's centre. Rows
- * are shared out between a few threads (WA's own thread waits for them). */
-static struct { const uint8_t *src; uint8_t *dst; int stride, cx1, cx2, cy1; double z; int rw, rh, bx, by, ox, oy; } job;
-
-static void make_taps(tap *t, int p0, int p1, int o, int b, double z, int r) {
-    double inv = 1.0 / z;
-    int p, k;
-    for (p = p0; p < p1; p++, t++) {
-        double s0 = b + (p - o) * inv, s1 = s0 + inv, wsum = 0, wk[MAX_TAPS];
-        int i0 = (int)floor(s0), n = (int)ceil(s1) - i0, left = 256;
-        if (n < 1) n = 1;
-        if (n > MAX_TAPS) n = MAX_TAPS;
-        for (k = 0; k < n; k++) {
-            double a = i0 + k > s0 ? i0 + k : s0, e = i0 + k + 1 < s1 ? i0 + k + 1 : s1;
-            wk[k] = e > a ? e - a : 0.0;
-            wsum += wk[k];
-        }
-        if (wsum <= 0) { wk[0] = wsum = 1.0; }
-        t->n = 0;
-        for (k = 0; k < n; k++) {           /* (pixels it barely touches dropped: weight 0 after rounding) */
-            int q = i0 + k, w = k < n - 1 ? (int)floor(wk[k] / wsum * 256.0 + 0.5) : left;
-            if (w > left) w = left;
-            left -= w;
-            if (w <= 0) continue;
-            t->i[t->n] = q < 0 ? 0 : q >= r ? r - 1 : q;
-            t->w[t->n] = (uint16_t)w;
-            t->n++;
-        }
-        if (!t->n) { t->i[0] = i0 < 0 ? 0 : i0 >= r ? r - 1 : i0; t->w[0] = 256; t->n = 1; }
-    }
-}
-
-static int pal_nearest(const uint8_t *pal, int r, int g, int b);
-
-static uint8_t quantize(int r, int g, int b) {
-    uint32_t key = (uint32_t)((r >> 3) << 10 | (g >> 3) << 5 | (b >> 3)), e = lut[key];
-    int idx;
-    if ((e >> 8) == lut_gen) return (uint8_t)e;
-    idx = pal_nearest(lut_pal, r, g, b);
-    lut[key] = (lut_gen << 8) | (uint32_t)idx;   /* (one aligned word: safe to fill from several threads) */
-    return (uint8_t)idx;
-}
-
-static void rows_smooth(int y0, int y1) {
-    int y, x, ky, kx;
-    for (y = y0; y < y1; y++) {
-        const tap *rt = &rowtaps[y - job.cy1];
-        const uint8_t *row[MAX_TAPS];
-        const int ny = rt->n;
-        uint8_t *dst = job.dst + (size_t)y * job.stride;
-        for (ky = 0; ky < ny; ky++) row[ky] = job.src + (size_t)rt->i[ky] * gw;
-        for (x = job.cx1; x < job.cx2; x++) {
-            const tap *ct = &coltaps[x - job.cx1];
-            const int nx = ct->n, c0 = ct->i[0];
-            const uint8_t first = row[0][c0];
-            uint32_t r = 0, g = 0, b = 0;
-            /* most screen pixels cover one colour only (sky, water, land): a byte compare each, no colour sums */
-            for (ky = 0; ky < ny; ky++) {
-                const uint8_t *rr = row[ky];
-                for (kx = 0; kx < nx; kx++) if (rr[ct->i[kx]] != first) goto mixed;
-            }
-            dst[x] = first;
-            continue;
-        mixed:
-            for (ky = 0; ky < ny; ky++) {
-                const uint8_t *rr = row[ky];
-                const uint32_t wy = rt->w[ky];
-                for (kx = 0; kx < nx; kx++) {
-                    const uint8_t *c = pal_rgb[rr[ct->i[kx]]];
-                    const uint32_t w = wy * ct->w[kx];
-                    r += c[0] * w; g += c[1] * w; b += c[2] * w;
-                }
-            }
-            dst[x] = quantize((int)(r >> 16), (int)(g >> 16), (int)(b >> 16));
-        }
-    }
-}
-
-static void rows_nearest(int y0, int y1) {
-    int y, x;
-    for (y = y0; y < y1; y++) {
-        const uint8_t *src = job.src + (size_t)zoom_src(y, job.oy, job.by, job.z, job.rh) * gw;
-        uint8_t *dst = job.dst + (size_t)y * job.stride;
-        for (x = job.cx1; x < job.cx2; x++) dst[x] = src[colmap[x]];
-    }
-}
-
-static void rows(int y0, int y1) { if (filter_smooth) rows_smooth(y0, y1); else rows_nearest(y0, y1); }
-
-/* a rectangle of one colour in the world buffer (WA's fills while the map is drawn, and the buffer's clearing) */
-static struct { int x1, x2; uint8_t colour; } fill;
-static void fill_rows(int y0, int y1) {
-    int y;
-    for (y = y0; y < y1; y++) memset(wbuf + (size_t)y * gw + fill.x1, fill.colour, (size_t)(fill.x2 - fill.x1));
-}
-
-/* the helpers: started at the first zoomed frame, each waits for its band of rows */
-#define MAX_HELPERS 15
+/* ---- helper threads ---------------------------------------------------------------------------------------------- */
 static int helpers = -1;
 static HANDLE helper_go[MAX_HELPERS], helper_done[MAX_HELPERS];
 static int helper_y0[MAX_HELPERS], helper_y1[MAX_HELPERS];
-static void (*helper_work)(int, int);
+static void (*helper_work)(int, int, int);
 
 static DWORD WINAPI helper(LPVOID arg) {
     int k = (int)(intptr_t)arg;
     for (;;) {
         WaitForSingleObject(helper_go[k], INFINITE);
-        helper_work(helper_y0[k], helper_y1[k]);
+        helper_work(helper_y0[k], helper_y1[k], k + 1);
         SetEvent(helper_done[k]);
     }
     return 0;
-}
-
-static void start_helpers(void);
-
-/* rows y0..y1 shared out between this thread and the helpers; small jobs stay on this thread */
-static void parallel_rows(void (*work)(int, int), int y0, int y1, long pixels) {
-    int k, band, y;
-    if (helpers < 0) start_helpers();
-    if (helpers <= 0 || pixels < 65536 || y1 - y0 < 2 * (helpers + 1)) { work(y0, y1); return; }
-    helper_work = work;
-    band = (y1 - y0 + helpers) / (helpers + 1);
-    y = y0 + band;                          /* the first band is this thread's own */
-    for (k = 0; k < helpers; k++) {
-        helper_y0[k] = y < y1 ? y : y1;
-        helper_y1[k] = y + band < y1 ? y + band : y1;
-        y += band;
-        SetEvent(helper_go[k]);
-    }
-    work(y0, y0 + band < y1 ? y0 + band : y1);
-    WaitForMultipleObjects((DWORD)helpers, helper_done, TRUE, INFINITE);
 }
 
 static void start_helpers(void) {
@@ -434,140 +482,588 @@ static void start_helpers(void) {
         CloseHandle(t);
         helpers++;
     }
-    say("%d helper threads for the scaling and fills", helpers);
+    say("%d helper threads for the drawing", helpers);
 }
 
-/* the palette as RGB, and the colour table started afresh when WA's palette changed */
+/* rows y0..y1 shared out between this thread (worker 0) and the helpers (1..); small jobs stay on this thread */
+static void parallel_rows(void (*work)(int, int, int), int y0, int y1, long cost) {
+    int k, band, y;
+    if (helpers < 0) start_helpers();
+    if (helpers <= 0 || cost < 32768 || y1 - y0 < 2 * (helpers + 1)) { work(y0, y1, 0); return; }
+    helper_work = work;
+    band = (y1 - y0 + helpers) / (helpers + 1);
+    y = y0 + band;                          /* the first band is this thread's own */
+    for (k = 0; k < helpers; k++) {
+        helper_y0[k] = y < y1 ? y : y1;
+        helper_y1[k] = y + band < y1 ? y + band : y1;
+        y += band;
+        SetEvent(helper_go[k]);
+    }
+    work(y0, y0 + band < y1 ? y0 + band : y1, 0);
+    WaitForMultipleObjects((DWORD)helpers, helper_done, TRUE, INFINITE);
+}
+
+/* ---- WA's palette ------------------------------------------------------------------------------------------------ */
+static int pal_nearest(const uint8_t *pal, int r, int g, int b) {
+    int k, best = 0;
+    long bd = 0x7fffffff;
+    for (k = 0; k < 256; k++) {
+        long dr = pal[4 * k] - r, dg = pal[4 * k + 1] - g, db = pal[4 * k + 2] - b, d = dr * dr * 3 + dg * dg * 4 + db * db * 2;
+        if (d < bd) { bd = d; best = k; }
+    }
+    return best;
+}
+
+static inline uint32_t ex_hash(uint32_t c) { return (c * 2654435761u) >> 22; }
+
+/* the palette as RGB, and the colour tables started afresh when WA's palette changed */
 static void palette_rgb(void *display) {
     const uint8_t *pal = (const uint8_t *)display + D_PALETTE;
     int k;
     if (!memcmp(lut_pal, pal, sizeof(lut_pal))) return;
     memcpy(lut_pal, pal, sizeof(lut_pal));
-    for (k = 0; k < 256; k++) { pal_rgb[k][0] = pal[4 * k]; pal_rgb[k][1] = pal[4 * k + 1]; pal_rgb[k][2] = pal[4 * k + 2]; }
-    lut_gen = (lut_gen + 1) & 0xffffff;
-    if (!lut_gen) { memset(lut, 0, sizeof(uint32_t) * 32768); lut_gen = 1; }
-}
-
-/* the world drawn so far (the buffer's rw x rh with the camera's centre at bx, by) onto WA's frame, scaled */
-static void composite(void *display, const view_state *wa, int cx1, int cy1, int cx2, int cy2, double z, int rw, int rh,
-                      int bx, int by) {
-    int x;
-    job.src = wbuf; job.dst = (uint8_t *)(uintptr_t)wa->data; job.stride = wa->stride;
-    job.cx1 = cx1; job.cx2 = cx2; job.cy1 = cy1; job.z = z; job.rw = rw; job.rh = rh; job.bx = bx; job.by = by;
-    job.ox = wa->org[0]; job.oy = wa->org[1];
-    if (filter_smooth && lut && coltaps && rowtaps) {
-        palette_rgb(display);
-        make_taps(coltaps, cx1, cx2, wa->org[0], bx, z, rw);
-        make_taps(rowtaps, cy1, cy2, wa->org[1], by, z, rh);
-    } else {
-        filter_smooth = 0;
-        for (x = cx1; x < cx2; x++) colmap[x] = zoom_src(x, wa->org[0], bx, z, rw);
+    memset(ex_key, 0, sizeof(ex_key));
+    for (k = 0; k < 256; k++) {
+        uint32_t c = (uint32_t)pal[4 * k] << 16 | (uint32_t)pal[4 * k + 1] << 8 | pal[4 * k + 2], h = ex_hash(c);
+        pal32[k] = c;
+        while (ex_key[h] && ex_key[h] != (c | 0x1000000u)) h = (h + 1) & 1023;
+        if (!ex_key[h]) { ex_key[h] = c | 0x1000000u; ex_idx[h] = (uint8_t)k; }
     }
-    parallel_rows(rows, cy1, cy2, (long)(cx2 - cx1) * (cy2 - cy1));
+    lut_gen = (lut_gen + 1) & 0xffffff;
+    if (!lut_gen) { if (lut) memset(lut, 0, sizeof(uint32_t) << 18); lut_gen = 1; }
+    if (++pal_gen == 0) pal_gen = 1;
 }
 
-/* WA's rectangle fill (sky, water and other fills) while the map is drawn into the world buffer: the same rectangle
- * (from the display's origin, inside its clip), filled by the helpers; otherwise WA's own */
-static int world_mode;
-static void (__fastcall *original_fill)(void *, int, int, int, int, int, int);
+/* the palette colour nearest a colour: its own index when it is one of the palette's, else from the table (filled as
+ * colours come up; one aligned word each, so helper threads can share it) */
+static uint8_t nearest(uint32_t c) {
+    uint32_t h, e, key;
+    int idx;
+    c &= 0xffffffu;
+    for (h = ex_hash(c); (e = ex_key[h]) != 0; h = (h + 1) & 1023)
+        if (e == (c | 0x1000000u)) return ex_idx[h];
+    key = ((c >> 18) & 63u) << 12 | ((c >> 10) & 63u) << 6 | ((c >> 2) & 63u);
+    e = lut[key];
+    if ((e >> 8) == lut_gen) return (uint8_t)e;
+    idx = pal_nearest(lut_pal, (int)((c >> 16) & 255u), (int)((c >> 8) & 255u), (int)(c & 255u));
+    lut[key] = (lut_gen << 8) | (uint32_t)idx;
+    return (uint8_t)idx;
+}
+
+/* ---- the land ---------------------------------------------------------------------------------------------------- */
+static void land_free(void) {
+    int k;
+    free(tiles); free(land.now); free(land.stamp); free(land_snap); free(land_full);
+    for (k = 1; k <= RASTER_LEVELS; k++) free(land.mip[k]);
+    tiles = NULL; ntiles = 0; land_snap = NULL; land_full = NULL;
+    memset(&land, 0, sizeof(land));
+    land_ok = 0; land_terrain = NULL;
+}
+
+static int tile_cmp(const void *a, const void *b) {
+    uintptr_t x = ((const tile_ref *)a)->bm, y = ((const tile_ref *)b)->bm;
+    return x < y ? -1 : x > y;
+}
+
+static int tile_find(uintptr_t bm) {
+    int lo = 0, hi = ntiles - 1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2;
+        if (tiles[m].bm == bm) return m;
+        if (tiles[m].bm < bm) lo = m + 1; else hi = m - 1;
+    }
+    return -1;
+}
+
+/* the game's land, once its tiles exist (wkVista, land.rs): where each tile lies, the land at the start, the shrunk
+ * copies' room, and its full-colour original when one matches */
+static void land_setup(void *display) {
+    char *terrain = *(char **)((char *)display + D_TERRAIN);
+    uint32_t *arr;
+    int w, h, tw, th, cols, rows, k, need, lev, key = -1;
+    if (!terrain || terrain == land_terrain) return;
+    arr = *(uint32_t **)(terrain + 4);
+    w = FIELD(display, D_LAND_W); h = FIELD(display, D_LAND_H); tw = FIELD(display, D_TILE_W); th = FIELD(display, D_TILE_H);
+    if (!arr || w <= 0 || h <= 0 || tw <= 0 || th <= 0 || w > 0x8000 || h > 0x8000) return;
+    land_free();
+    land_terrain = terrain;
+    cols = (w + tw - 1) / tw; rows = (h + th - 1) / th;
+    tiles = (tile_ref *)malloc(sizeof(tile_ref) * (size_t)cols * rows);
+    land_snap = (uint8_t *)calloc((size_t)w * h, 1);
+    land.now = (uint8_t *)malloc((size_t)w * h);
+    land.stamp = (uint32_t *)calloc((size_t)cols * rows, sizeof(uint32_t));
+    if (!tiles || !land_snap || !land.now || !land.stamp) { land_free(); land_terrain = terrain; say("land: no memory"); return; }
+    for (k = 0; k < cols * rows; k++) {
+        char *bm = (char *)(uintptr_t)arr[k], *s;
+        int x0 = (k % cols) * tw, y0 = (k / cols) * th, y, sw_, sh_;
+        const uint8_t *data;
+        if (!bm) continue;
+        tiles[ntiles].bm = (uintptr_t)bm; tiles[ntiles].x = x0; tiles[ntiles].y = y0; ntiles++;
+        s = *(char **)(bm + 4);
+        if (!s) continue;
+        sw_ = FIELD(s, 4); sh_ = FIELD(s, 8); data = *(const uint8_t **)(s + 0xc);
+        if (key < 0) key = *(uint8_t *)(s + 0x10);
+        if (!data || sw_ <= 0 || sh_ <= 0) continue;
+        for (y = 0; y < sh_ && y0 + y < h; y++)
+            memcpy(land_snap + (size_t)(y0 + y) * w + x0, data + (size_t)y * sw_, (size_t)(sw_ < w - x0 ? sw_ : w - x0));
+    }
+    qsort(tiles, (size_t)ntiles, sizeof(tile_ref), tile_cmp);
+    need = cfg.max_out >= 8.0 ? 3 : cfg.max_out >= 4.0 ? 2 : cfg.max_out >= 2.0 ? 1 : 0;
+    for (lev = 0; lev < need && tw % (2 << lev) == 0 && th % (2 << lev) == 0; lev++) {}
+    land.w = w; land.h = h; land.tw = tw; land.th = th; land.cols = cols; land.rows = rows;
+    land.keyed = 1; land.key = (uint8_t)(key < 0 ? 0 : key);
+    for (k = 1; k <= lev; k++) {
+        land.mw[k] = (w + (1 << k) - 1) >> k; land.mh[k] = (h + (1 << k) - 1) >> k;
+        land.mip[k] = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)land.mw[k] * land.mh[k]);
+        if (!land.mip[k]) break;
+    }
+    land.levels = k - 1 < lev ? k - 1 : lev;
+    memcpy(land.now, land_snap, (size_t)w * h);
+    land.snap = land_snap;
+    if (colour_maps) land_full = colourmap_match(w, h, land_snap);
+    if (!land_full && test_fullcolour && (land_full = (uint32_t *)calloc((size_t)w * h, sizeof(uint32_t))) != NULL) {
+        int x, y;                           /* (test mode: made-up full colours, a rainbow across the land) */
+        for (y = 0; y < h; y++)
+            for (x = 0; x < w; x++) {
+                const int i = y * w + x, hue = ((x + y) / 4) % 768, a = hue % 256;
+                uint32_t r = hue < 256 ? 255 - a : hue < 512 ? 0 : a, g = hue < 256 ? a : hue < 512 ? 255 - a : 0;
+                uint32_t b = hue < 256 ? 0 : hue < 512 ? a : 255 - a;
+                if (land_snap[i] != land.key) land_full[i] = 0x1000000u | r << 16 | g << 8 | b;
+            }
+        say("test: made-up full colours for the land");
+    }
+    land.full = land_full;
+    land_ok = 1;
+    say("land %dx%d in %d tiles of %dx%d (see-through %d), %d shrunk copies%s", w, h, ntiles, tw, th, land.key,
+        land.levels, land_full ? ", full colour" : "");
+}
+
+/* ---- the map's drawing calls, drawn onto the screen -------------------------------------------------------------- */
+static const rop *job_op;
+static rprep job_prep;
+static void op_rows(int y0, int y1, int k) { (void)k; raster_draw(job_op, &rv, &job_prep, y0, y1); }
+
+/* the frame's taps of one level (columns, then rows), shared out between the threads */
+static struct { rtap *t; int p0, o, level; double b, off; } ax;
+static void axis_rows(int i0, int i1, int k) {
+    (void)k;
+    raster_axis(ax.t + (i0 - ax.p0), i0, i1, ax.o, ax.b, rv.z, ax.off, ax.level, ax.level ? 0 : rv.point);
+}
+static void frame_taps(int level, double offx, double offy) {
+    ax.t = frame_tx[level]; ax.p0 = rv.x1; ax.o = rv.ox; ax.b = rv.bx; ax.off = offx; ax.level = level;
+    parallel_rows(axis_rows, rv.x1, rv.x2, (long)(rv.x2 - rv.x1) * 64);
+    ax.t = frame_ty[level]; ax.p0 = rv.y1; ax.o = rv.oy; ax.b = rv.by; ax.off = offy;
+    parallel_rows(axis_rows, rv.y1, rv.y2, (long)(rv.y2 - rv.y1) * 64);
+    rv.gx[level] = frame_tx[level]; rv.gy[level] = frame_ty[level];
+    rv.gox[level] = offx; rv.goy[level] = offy;
+}
+
+static void draw_op(const rop *op) {
+    rprep p;
+    long cost;
+    LONGLONG t0 = qpc();
+    if (!raster_prepare(op, &rv, &p)) { t_ops += qpc() - t0; return; }
+    n_ops++;
+    cost = (long)(p.x2 - p.x1) * (p.y2 - p.y1);
+    if (op->kind != ROP_FILL && !p.level && rv.z < 1.0) cost = (long)(cost / (rv.z * rv.z));
+    if (cost >= 32768) { job_op = op; job_prep = p; parallel_rows(op_rows, p.y1, p.y2, cost); }
+    else raster_draw(op, &rv, &p, p.y1, p.y2);
+    t_ops += qpc() - t0;
+}
+
+/* an operation's output rows */
+static int op_out_rows(const rop *op, int *a, int *b) {
+    *a = (int)floor((op->t - rv.by) * rv.z + rv.oy);
+    *b = (int)ceil((op->b - rv.by) * rv.z + rv.oy);
+    if (*a < rv.y1) *a = rv.y1;
+    if (*b > rv.y2) *b = rv.y2;
+    return *a < *b;
+}
+
+static void sync_rows(int i0, int i1, int k) {
+    int i;
+    (void)k;
+    for (i = i0; i < i1; i++) raster_land_sync(&land, &batch[i].src, batch[i].land_x, batch[i].land_y, pal32, pal_gen, (int)(frames & 3));
+}
+
+static void land_rows(int y0, int y1, int k) {
+    int i;
+    (void)k;
+    for (i = 0; i < nbatch; i++) {
+        rprep p;
+        int a, b;
+        if (!op_out_rows(&batch[i], &a, &b) || b <= y0 || a >= y1) continue;
+        if (raster_prepare(&batch[i], &rv, &p)) raster_draw(&batch[i], &rv, &p, y0, y1);
+    }
+}
+
+/* the land tiles queued (they never overlap: drawn together, shared out by rows; their shrunk copies brought up to date
+ * first) */
+static void batch_flush(void) {
+    int i, ya = INT_MAX, yb = INT_MIN;
+    long cost = 0;
+    LONGLONG t0, t1;
+    int level;
+    if (!nbatch) return;
+    t0 = qpc();
+    level = rv.point ? 0 : raster_level(&land, rv.z);
+    if (level > 0) {
+        const double offx = (double)batch[0].col0 + batch[0].land_x, offy = (double)batch[0].row0 + batch[0].land_y;
+        parallel_rows(sync_rows, 0, nbatch, (long)nbatch * 8192);
+        if (!rv.gx[level] || rv.gox[level] != offx || rv.goy[level] != offy) frame_taps(level, offx, offy);
+    }
+    t1 = qpc();
+    t_sync += t1 - t0;
+    for (i = 0; i < nbatch; i++) {
+        int a, b;
+        if (!op_out_rows(&batch[i], &a, &b)) continue;
+        if (a < ya) ya = a;
+        if (b > yb) yb = b;
+        cost += (long)(b - a) * (long)((batch[i].r - batch[i].l) * rv.z + 1);
+    }
+    n_land += (unsigned)nbatch;
+    if (ya < yb) parallel_rows(land_rows, ya, yb, cost);
+    nbatch = 0;
+    t_land += qpc() - t1;
+}
+
+static void batch_add(const rop *op) {
+    if (nbatch == cap_batch) {
+        int cap = cap_batch ? cap_batch * 2 : 256;
+        rop *nb = (rop *)realloc(batch, sizeof(rop) * (size_t)cap);
+        if (!nb) { batch_flush(); draw_op(op); return; }
+        batch = nb; cap_batch = cap;
+    }
+    batch[nbatch++] = *op;
+}
+
+/* the region buffer's part WA drew itself (an operation the module doesn't draw: its pixels other than SENT) */
+static void pend_flush(void) {
+    rop op;
+    if (!pend.on) return;
+    pend.on = 0;
+    memset(&op, 0, sizeof(op));
+    op.kind = ROP_BITMAP; op.l = pend.l; op.t = pend.t; op.r = pend.r; op.b = pend.b;
+    op.src.data = wbuf; op.src.w = rw_now; op.src.h = rh_now; op.src.stride = gw;
+    op.col0 = 0; op.dir = 1; op.row0 = 0; op.keyed = 1; op.key = SENT; op.land_x = -1;
+    draw_op(&op);
+}
+
+/* clip an operation's area to a clip rectangle (NULL: none) and the region */
+static int clip_area(rop *op, int l, int t, int r, int b, const int32_t *c) {
+    if (c) {
+        if (l < c[0]) l = c[0];
+        if (t < c[1]) t = c[1];
+        if (r > c[2]) r = c[2];
+        if (b > c[3]) b = c[3];
+    }
+    if (l < 0) l = 0;
+    if (t < 0) t = 0;
+    if (r > rw_now) r = rw_now;
+    if (b > rh_now) b = rh_now;
+    op->l = l; op->t = t; op->r = r; op->b = b;
+    return l < r && t < b;
+}
+
+/* an operation the module doesn't draw: WA draws it into the region buffer (its area marked first), and the next
+ * operation (or the map's end) takes what it drew from there */
+static void refuse(int l, int t, int r, int b, const int32_t *c, const char *why) {
+    rop a;
+    int y;
+    batch_flush();
+    n_refused++;
+    if (n_refused_logged < 8) { n_refused_logged++; say("drawn by WA into the region buffer: %s", why); }
+    if (!clip_area(&a, l, t, r, b, c)) return;
+    for (y = a.t; y < a.b; y++) memset(wbuf + (size_t)y * gw + a.l, SENT, (size_t)(a.r - a.l));
+    pend.on = 1; pend.l = a.l; pend.t = a.t; pend.r = a.r; pend.b = a.b;
+}
+
+static int32_t clip_of(const void *obj, int off, int32_t *c) {
+    int k;
+    for (k = 0; k < 4; k++) c[k] = FIELD(obj, off + 4 * k);
+    return 1;
+}
+
+/* DisplayGfx::BlitBitmapClipped: x, y its top-left on the display, EDX its width; flags & 2: see-through colour */
+int __cdecl h_bitmap(uint32_t *r) {
+    void *d = (void *)(uintptr_t)r[7];
+    char *bm = (char *)(uintptr_t)r[12], *s;
+    int32_t c[4];
+    int x = (int32_t)r[9], y = (int32_t)r[10], h = (int32_t)r[11], w = (int32_t)r[5], k;
+    rop op;
+    if (!world_mode || d != frame_display) return 0;
+    pend_flush();
+    s = bm ? *(char **)(bm + 4) : NULL;
+    if (!s || !*(uint8_t **)(s + 0xc)) return 0;    /* (no surface yet: WA makes one and draws nothing) */
+    memset(&op, 0, sizeof(op));
+    op.kind = ROP_BITMAP;
+    op.src.data = *(const uint8_t **)(s + 0xc); op.src.w = FIELD(s, 4); op.src.h = FIELD(s, 8); op.src.stride = op.src.w;
+    op.keyed = (r[13] & 2) != 0; op.key = *(uint8_t *)(s + 0x10);
+    op.col0 = -x; op.dir = 1; op.row0 = -y; op.land_x = -1;
+    clip_of(d, D_CLIP, c);
+    if (!clip_area(&op, x, y, x + w, y + h, c)) return 1;
+    if (land_ok && (k = tile_find((uintptr_t)bm)) >= 0 && op.keyed && op.key == land.key) {
+        op.land_x = tiles[k].x; op.land_y = tiles[k].y;
+        batch_add(&op);
+        return 1;
+    }
+    batch_flush();
+    draw_op(&op);
+    return 1;
+}
+
+/* the display's rectangle fill (from its origin, inside its clip) */
 static void __fastcall hook_fill(void *d, int edx, int x1, int y1, int x2, int y2, int colour) {
-    int ox, oy, cl0, cl1, cl2, cl3;
-    if (!world_mode || d != frame_display || !wbuf) { original_fill(d, edx, x1, y1, x2, y2, colour); return; }
+    int32_t c[4];
+    int ox, oy;
+    rop op;
+    if (!world_mode || d != frame_display) { original_fill(d, edx, x1, y1, x2, y2, colour); return; }
+    pend_flush();
+    batch_flush();
     ox = FIELD(d, D_ORG); oy = FIELD(d, D_ORG + 4);
-    cl0 = FIELD(d, D_CLIP); cl1 = FIELD(d, D_CLIP + 4); cl2 = FIELD(d, D_CLIP + 8); cl3 = FIELD(d, D_CLIP + 12);
-    if (cl0 < 0) cl0 = 0;
-    if (cl1 < 0) cl1 = 0;
-    if (cl2 > gw) cl2 = gw;
-    if (cl3 > gh) cl3 = gh;
-    x1 += ox; x2 += ox; y1 += oy; y2 += oy;
-    if (x2 <= cl0 || y2 <= cl1 || x1 >= cl2 || y1 >= cl3) return;
-    if (x1 < cl0) x1 = cl0;
-    if (y1 < cl1) y1 = cl1;
-    if (x2 > cl2) x2 = cl2;
-    if (y2 > cl3) y2 = cl3;
-    fill.x1 = x1; fill.x2 = x2; fill.colour = (uint8_t)colour;
-    parallel_rows(fill_rows, y1, y2, (long)(x2 - x1) * (y2 - y1));
+    memset(&op, 0, sizeof(op));
+    op.kind = ROP_FILL; op.index = (uint8_t)colour; op.land_x = -1;
+    clip_of(d, D_CLIP, c);
+    if (clip_area(&op, x1 + ox, y1 + oy, x2 + ox, y2 + oy, c)) draw_op(&op);
 }
 
-static uint32_t queue_list[MAX_ENTRIES];
+/* BitGrid::BlitSpriteRect into the frame: the variants wkVista draws (raster.rs `check`); the rest WA's own */
+int __cdecl h_grid(uint32_t *r) {
+    char *g = (char *)(uintptr_t)r[1], *sg = (char *)(uintptr_t)r[13];
+    int x = (int32_t)r[9], y = (int32_t)r[10], w = (int32_t)r[11], h = (int32_t)r[12];
+    int sx = (int32_t)r[14], sy = (int32_t)r[15], mode = (int32_t)r[17], drawn, kind, orient, mirrored, ok;
+    const uint8_t *lut_ = (const uint8_t *)(uintptr_t)r[16];
+    int32_t c[4];
+    rop op;
+    if (!world_mode || !frame_grid || g != (char *)frame_grid) return 0;
+    pend_flush();
+    clip_of(g, GR_CLIP, c);
+    drawn = w && h && x < c[2] && x + w > c[0] && y < c[3] && y + h > c[1] &&
+            (x > c[0] ? x : c[0]) != (x + w < c[2] ? x + w : c[2]) && (y > c[1] ? y : c[1]) != (y + h < c[3] ? y + h : c[3]);
+    if (drawn) {
+        kind = mode & 0xffff; orient = (int)((uint32_t)mode >> 16);
+        mirrored = orient == 1 || orient == 0xa;
+        ok = (orient == 0 || orient == 0xb || mirrored) &&
+             ((kind == 1 && (!mirrored || !lut_)) || ((kind == 0 || kind == 2 || kind == 3) && !mirrored && !lut_));
+        if (!sg || sg == g || FIELD(sg, GR_BPP) != 8 || !ok) {
+            char why[96];
+            snprintf(why, sizeof(why), "a sprite blit, mode %d orientation %x, %s", kind, orient,
+                     !sg ? "no source" : sg == g ? "from the frame itself" : FIELD(sg, GR_BPP) != 8 ? "not 8-bit" : "variant");
+            refuse(x, y, x + w, y + h, c, why);
+            return 0;
+        }
+        memset(&op, 0, sizeof(op));
+        op.kind = ROP_GRID; op.mode = kind; op.lut = lut_; op.land_x = -1;
+        op.src.data = *(const uint8_t **)(sg + GR_DATA); op.src.w = FIELD(sg, GR_W); op.src.h = FIELD(sg, GR_H);
+        op.src.stride = FIELD(sg, GR_STRIDE);
+        if (mirrored) { op.col0 = sx + x + w - 1; op.dir = -1; } else { op.col0 = sx - x; op.dir = 1; }
+        op.row0 = sy - y;
+        batch_flush();
+        if (op.src.data && clip_area(&op, x, y, x + w, y + h, c)) draw_op(&op);
+    }
+    r[7] = (uint32_t)drawn;                 /* (WA's result: 1 when something is drawn) */
+    return 1;
+}
 
-/* one entry drawn by WA's own RenderDrawingQueue (the queue shown as holding it alone) */
+/* the frame grid's pixels, lines and fills: rectangles of one colour */
+static int grid_rect(uint32_t *r, int l, int t, int rr, int b, int colour, int clipped) {
+    char *g = (char *)(uintptr_t)r[6];
+    int32_t c[4];
+    rop op;
+    if (!world_mode || !frame_grid || g != (char *)frame_grid) return 0;
+    pend_flush();
+    batch_flush();
+    memset(&op, 0, sizeof(op));
+    op.kind = ROP_FILL; op.index = (uint8_t)colour; op.land_x = -1;
+    if (clipped) clip_of(g, GR_CLIP, c);
+    if (clip_area(&op, l, t, rr, b, clipped ? c : NULL)) draw_op(&op);
+    return 1;
+}
+int __cdecl h_pixel_clipped(uint32_t *r) { return grid_rect(r, (int32_t)r[9], (int32_t)r[10], (int32_t)r[9] + 1, (int32_t)r[10] + 1, (int32_t)r[11], 1); }
+int __cdecl h_pixel(uint32_t *r) { return grid_rect(r, (int32_t)r[9], (int32_t)r[10], (int32_t)r[9] + 1, (int32_t)r[10] + 1, (int32_t)r[11], 0); }
+int __cdecl h_vline(uint32_t *r) { return grid_rect(r, (int32_t)r[9], (int32_t)r[10], (int32_t)r[9] + 1, (int32_t)r[11], (int32_t)r[12], 0); }
+int __cdecl h_grid_fill(uint32_t *r) { return grid_rect(r, (int32_t)r[9], (int32_t)r[10], (int32_t)r[11], (int32_t)r[12], (int32_t)r[13], 1); }
+
+/* ---- the map onto WA's frame, and the true-colour frame ---------------------------------------------------------- */
+static uint32_t clear_colour;
+static uint8_t *q_frame;
+static int q_stride;
+static void clear_rows(int y0, int y1, int k) {
+    int y, x;
+    (void)k;
+    for (y = y0; y < y1; y++) {
+        uint32_t *row = rgb + (size_t)y * sw;
+        for (x = tc.x1; x < tc.x2; x++) row[x] = clear_colour;
+    }
+}
+static void sent_rows(int y0, int y1, int k) {
+    int y;
+    (void)k;
+    for (y = y0; y < y1; y++) memset(wbuf + (size_t)y * gw, SENT, (size_t)rw_now);
+}
+static void quant_rows(int y0, int y1, int k) {
+    int y, x;
+    (void)k;
+    for (y = y0; y < y1; y++) {
+        const uint32_t *s = rgb + (size_t)y * sw;
+        uint8_t *d = q_frame + (size_t)y * q_stride;
+        for (x = tc.x1; x < tc.x2; x++) d[x] = nearest(s[x]);
+    }
+}
+
+/* the frame to show: each pixel the map's own colour where WA's frame still holds the map (its nearest palette colour),
+ * else (the HUD, the readout) the palette's */
+static struct { uint8_t *bits; int pitch; const uint8_t *frame; int fstride, w; } cj;
+static void compose_rows(int y0, int y1, int k) {
+    int y, x;
+    (void)k;
+    for (y = y0; y < y1; y++) {
+        uint32_t *d = (uint32_t *)(cj.bits + (size_t)y * cj.pitch);
+        const uint8_t *f = cj.frame + (size_t)y * cj.fstride;
+        const uint32_t *s = rgb + (size_t)y * sw;
+        if (y >= tc.y1 && y < tc.y2) {
+            for (x = 0; x < tc.x1; x++) d[x] = pal32[f[x]];
+            for (x = tc.x1; x < tc.x2; x++) d[x] = f[x] == nearest(s[x]) ? s[x] : pal32[f[x]];
+            for (x = tc.x2; x < cj.w; x++) d[x] = pal32[f[x]];
+        } else {
+            for (x = 0; x < cj.w; x++) d[x] = pal32[f[x]];
+        }
+    }
+}
+static int compose(uint8_t *bits, int pitch, int w, int h) {
+    const uint8_t *frame = *(const uint8_t **)VA(FRAME_PTR_VA);
+    int fw = *(int32_t *)VA(FRAME_W_VA), fh = *(int32_t *)VA(FRAME_H_VA);
+    if (!frame || !rgb || !tc.on || w != sw || h != sh || fw < w || fh < h) return 0;
+    cj.bits = bits; cj.pitch = pitch; cj.frame = frame; cj.fstride = fw; cj.w = w;
+    parallel_rows(compose_rows, 0, h, (long)w * h);
+    return 1;
+}
+
+/* Zoomed (or a full-colour land): every map entry (back to front) drawn onto the screen through the module, that into
+ * WA's frame, then every HUD entry (back to front) as WA draws it. (WA's own order puts the HUD in front of the map; an
+ * entry of each kind on one layer -- the turn's arrow shares layer 0 with the HUD -- keeps its place among its own kind.) */
+static uint32_t queue_list[MAX_ENTRIES];
 static int draw_entry(uint8_t *queue, void *display, void *camera, uint32_t e) {
     *(uint32_t *)(queue + Q_COUNT) = 1;
     ((uint32_t *)(queue + Q_ENTRIES))[0] = e;
     return call_queue(queue, display, camera);
 }
-
 static int is_screen(uint32_t e) {
     int32_t kind = *(int32_t *)(uintptr_t)e;
     return kind == 1 || kind == 4 || kind == 7;
 }
 
-/* Zoomed: every map entry (back to front) into the world buffer, that scaled onto WA's frame, then every HUD entry (back
- * to front) as WA draws it. (WA's own order puts the HUD in front of the map; an entry of each kind on one layer -- the
- * turn's arrow shares layer 0 with the HUD -- keeps its place among its own kind.) */
 int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
     typedef void (__cdecl *qsort_fn)(void *, size_t, size_t, void *);
     view_state wa, world;
     uint32_t n = *(uint32_t *)(queue + Q_COUNT);
     uint32_t *entries = (uint32_t *)(queue + Q_ENTRIES);
     double z = frame_zoom;
-    int i, last = 0, rw, rh, bx, by, cx1, cy1, cx2, cy2, nworld = 0, nscreen = 0;
+    int i, last = 0, rw, rh, bx, by, cx1, cy1, cx2, cy2, nworld = 0, nscreen = 0, colour_land = land_ok && land.full;
     LARGE_INTEGER t0, t1, t1b, t2;
-    if (z == 1.0 || display != frame_display || !wbuf || !n || n > MAX_ENTRIES)
+    static unsigned checks;
+    int check = 0;
+    if ((z == 1.0 && !colour_land && !(trail_visible && trail_show >= 0 && trail_hl)) || display != frame_display || !wbuf || !rgb || !n || n > MAX_ENTRIES)
         return call_queue(queue, display, camera);
     QueryPerformanceCounter(&t0);
+    {   /* the frame grid brought up to date if it describes another frame than the renderer's (as WA's lock would: a
+         * resolution switch leaves it out of date until WA's next display drawing call) */
+        char *g = *(char **)((char *)display + D_GRID);
+        const int32_t fb = *(int32_t *)VA(FRAME_PTR_VA), fbw = *(int32_t *)VA(FRAME_W_VA), fbh = *(int32_t *)VA(FRAME_H_VA);
+        if (g && fb && fbw > 0 && fbh > 0 && (FIELD(g, GR_DATA) != fb || FIELD(g, GR_STRIDE) != fbw || FIELD(g, GR_W) != fbw || FIELD(g, GR_H) != fbh)) {
+            static unsigned told;
+            if (told++ < 4) say("the display's frame grid was %dx%d (stride %d), the frame %dx%d: brought up to date", FIELD(g, GR_W),
+                                FIELD(g, GR_H), FIELD(g, GR_STRIDE), fbw, fbh);
+            FIELD(g, GR_DATA) = fb; FIELD(g, GR_STRIDE) = fbw; FIELD(g, GR_W) = fbw; FIELD(g, GR_H) = fbh;
+            FIELD(g, GR_CLIP) = 0; FIELD(g, GR_CLIP + 4) = 0; FIELD(g, GR_CLIP + 8) = fbw; FIELD(g, GR_CLIP + 12) = fbh;
+        }
+    }
     view_save(display, &wa);
+    /* The frame the map goes into is the renderer's own (007A0EEC: pixels, width = row stride, height), as WA's blits
+     * and fills use it. (Not the display's frame grid: WA brings that up to date lazily, at its first drawing call of a
+     * frame (its lock, 0056A370) -- and while zoomed the map's calls are the module's, so after a resolution switch the
+     * grid still describes the old frame when the map goes in: rows past the new frame's end, a crash.) */
     cx1 = wa.clip[0]; cy1 = wa.clip[1]; cx2 = wa.clip[2]; cy2 = wa.clip[3];
     if (cx1 < 0) cx1 = 0;
     if (cy1 < 0) cy1 = 0;
-    if (cx2 > wa.gw) cx2 = wa.gw;
-    if (cy2 > wa.gh) cy2 = wa.gh;
+    if (cx2 > wa.fbw) cx2 = wa.fbw;
+    if (cy2 > wa.fbh) cy2 = wa.fbh;
     if (cx2 > sw) cx2 = sw;
     if (cy2 > sh) cy2 = sh;
-    if (cx2 <= cx1 || cy2 <= cy1 || !wa.data) return call_queue(queue, display, camera);
+    if (cx2 <= cx1 || cy2 <= cy1 || !wa.fb || wa.fbw != sw || wa.fbh != sh) return call_queue(queue, display, camera);
     ((qsort_fn)VA(QSORT_VA))(entries, n, 4, (void *)VA(QUEUE_ORDER_VA));   /* WA's own order, as it sorts them */
     memcpy(queue_list, entries, n * 4);
     zoom_region(cx1, cy1, cx2, cy2, wa.org[0], wa.org[1], z, gw, gh, &rw, &rh, &bx, &by);
+    rw_now = rw; rh_now = rh;
     world = wa;
     world.w = rw; world.h = rh;
     world.clip[0] = world.clip[1] = 0; world.clip[2] = rw; world.clip[3] = rh;
     world.org[0] = bx; world.org[1] = by;
     world.data = (int32_t)(uintptr_t)wbuf; world.stride = gw; world.gw = rw; world.gh = rh;
     memcpy(world.gclip, world.clip, sizeof(world.clip));
-    world.fb = (int32_t)(uintptr_t)wbuf; world.fbw = gw; world.fbh = gh;   /* (WA's fills and land tiles: rows gw apart) */
-    fill.x1 = 0; fill.x2 = rw; fill.colour = 0;                           /* the buffer cleared (helpers) */
-    parallel_rows(fill_rows, 0, rh, (long)rw * rh);
+    world.fb = (int32_t)(uintptr_t)wbuf; world.fbw = gw; world.fbh = gh;   /* (rows gw apart) */
+    memset(&rv, 0, sizeof(rv));
+    rv.z = z; rv.bx = bx; rv.by = by; rv.ox = wa.org[0]; rv.oy = wa.org[1];
+    rv.x1 = cx1; rv.y1 = cy1; rv.x2 = cx2; rv.y2 = cy2;
+    rv.out = rgb; rv.stride = sw; rv.pal = pal32; rv.nearest = nearest; rv.land = land_ok ? &land : NULL; rv.gen = pal_gen;
+    rv.point = !filter_smooth;
+    frame_taps(0, 0.0, 0.0);
+    tc.on = 0; tc.x1 = cx1; tc.y1 = cy1; tc.x2 = cx2; tc.y2 = cy2;
+    clear_colour = pal32[0];
+    parallel_rows(clear_rows, cy1, cy2, (long)(cx2 - cx1) * (cy2 - cy1));
+    check = test_mode && checks < 3 && frames > 150;   /* (test mode: the region buffer watched for WA's own drawing) */
+    if (check) parallel_rows(sent_rows, 0, rh, (long)rw * rh);
+    n_ops = n_land = n_refused = 0;
+    t_sync = t_land = t_ops = 0;
+    pend.on = 0; nbatch = 0;
     view_load(display, &world);
     world_mode = 1;
     for (i = (int)n - 1; i >= 0; i--)       /* the map, back to front */
         if (!is_screen(queue_list[i])) { last = draw_entry(queue, display, camera, queue_list[i]); nworld++; }
+    pend_flush();
+    batch_flush();
     world_mode = 0;
     view_load(display, &wa);
+    if (camera) trail_draw((const int32_t *)camera);
+    if (check) {                            /* anything WA drew into the region buffer behind the module's back */
+        long stray = 0;
+        int y, x;
+        checks++;
+        for (y = 0; y < rh; y++) for (x = 0; x < rw; x++) stray += wbuf[(size_t)y * gw + x] != SENT;
+        say("test: %ld region pixels drawn by WA itself (%u operations it drew, %u drawn by the module, %u land tiles)",
+            stray, n_refused, n_ops, n_land);
+    }
     QueryPerformanceCounter(&t1);
-    composite(display, &wa, cx1, cy1, cx2, cy2, z, rw, rh, bx, by);
+    q_frame = (uint8_t *)(uintptr_t)wa.fb; q_stride = wa.fbw;
+    parallel_rows(quant_rows, cy1, cy2, (long)(cx2 - cx1) * (cy2 - cy1));
+    tc.on = 1;
     QueryPerformanceCounter(&t1b);
     for (i = (int)n - 1; i >= 0; i--)       /* the HUD, back to front */
         if (is_screen(queue_list[i])) { last = draw_entry(queue, display, camera, queue_list[i]); nscreen++; }
     *(uint32_t *)(queue + Q_COUNT) = n;
     memcpy(entries, queue_list, n * 4);
     QueryPerformanceCounter(&t2);
-    {   /* the cost, for the log: the map drawn big, the scaling, the HUD */
-        static double map_ms, scale_ms, rest_ms, zsum;
-        static unsigned count;
+    {   /* the cost, for the log: the map, its colours into WA's frame, the HUD */
+        static double map_ms, scale_ms, rest_ms, zsum, sync_ms, land_ms, ops_ms;
+        static unsigned count, ops, lands;
+        const double f = 1000.0 / clock_freq.QuadPart;
+        sync_ms += t_sync * f; land_ms += t_land * f; ops_ms += t_ops * f;
         map_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / clock_freq.QuadPart;
         scale_ms += (double)(t1b.QuadPart - t1.QuadPart) * 1000.0 / clock_freq.QuadPart;
         rest_ms += (double)(t2.QuadPart - t1b.QuadPart) * 1000.0 / clock_freq.QuadPart;
-        zsum += z;
+        zsum += z; ops += n_ops; lands += n_land;
         if (++count == 120) {
-            say("120 zoomed frames (zoom %.0f%% on average): map %.1f ms, scaling %.1f ms, HUD %.1f ms a frame",
-                zsum / count * 100.0, map_ms / count, scale_ms / count, rest_ms / count);
-            map_ms = scale_ms = rest_ms = zsum = 0; count = 0;
+            say("120 drawn frames (zoom %.0f%% on average): map %.2f ms (land copies' upkeep %.2f, land %.2f for %u tiles, "
+                "%u other drawing calls %.2f, WA's own %.2f), into WA's frame %.2f ms, HUD %.2f ms a frame; %u frames "
+                "shown in true colour so far", zsum / count * 100.0, map_ms / count, sync_ms / count, land_ms / count,
+                lands / count, ops / count, ops_ms / count, (map_ms - sync_ms - land_ms - ops_ms) / count, scale_ms / count,
+                rest_ms / count, present_shown());
+            map_ms = scale_ms = rest_ms = zsum = sync_ms = land_ms = ops_ms = 0; count = ops = lands = 0;
         }
     }
     if (!logged_split) {
         logged_split = 1;
-        say("first zoomed frame: %u entries: %d map (into %dx%d), %d HUD; view %d,%d..%d,%d, centre %d,%d", n, nworld, rw, rh,
+        say("first drawn frame: %u entries: %d map (region %dx%d), %d HUD; view %d,%d..%d,%d, centre %d,%d", n, nworld, rw, rh,
             nscreen, cx1, cy1, cx2, cy2, wa.org[0], wa.org[1]);
     }
     return last;
@@ -589,17 +1085,301 @@ void __cdecl clamp_hook(uint32_t *regs) {
     regs[10] = (uint32_t)height;
 }
 
-/* ---- the readout: "150%" in WA's palette ------------------------------------------------------------------------- */
-static int pal_nearest(const uint8_t *pal, int r, int g, int b) {
-    int k, best = 0;
-    long bd = 0x7fffffff;
-    for (k = 0; k < 256; k++) {
-        long dr = pal[4 * k] - r, dg = pal[4 * k + 1] - g, db = pal[4 * k + 2] - b, d = dr * dr * 3 + dg * dg * 4 + db * db * 2;
-        if (d < bd) { bd = d; best = k; }
-    }
-    return best;
+/* The camera follow (EAX half the view's width, EDI the camera; half its height, then the box it follows: x1, y1, x2,
+ * y2 in 1/65536 pixels). Zoomed in it is told half the zoomed-in view's size, so it keeps the worm inside what is seen;
+ * at 100% and below it follows as ever. */
+void __cdecl follow_hook(uint32_t *regs) {
+    const double z = zoom_now;
+    int32_t hw = (int32_t)regs[7], hh = (int32_t)regs[9];
+    static unsigned logged;
+    if (z <= 1.0 || !wbuf || GetTickCount() - live_tick > 1000) return;
+    hw = (int32_t)ceil(hw / z); hh = (int32_t)ceil(hh / z);
+    if (hw < 1) hw = 1;
+    if (hh < 1) hh = 1;
+    if (test_mode && logged < 3) { logged++; say("test: camera follow at %.0f%%: half view %dx%d -> %dx%d", z * 100.0, (int)regs[7], (int)regs[9], hw, hh); }
+    regs[7] = (uint32_t)hw;
+    regs[9] = (uint32_t)hh;
 }
 
+/* ---- the movement line ---------------------------------------------------------------------------------------- */
+/* Each frame the worm of the team whose turn it is (a team task with its turn flag, +0x3C, up: one team at a time; its
+ * current worm +0x48) is noted every 2 pixels it moves -- the worm itself, never the camera or the targeting cursor, so
+ * shots and a teleport's aiming are not in it -- and after its turn too, until another team's turn starts (it may fall
+ * or slide on). A jump (a teleport, another of the team's worms) starts a new piece of line. When a team's turn starts,
+ * its line is drawn on the map in red -- its last turn bright, fainter where that turn began and solid where it ended
+ * (the way it was going), its earlier turns dimmer -- until its worm moves. Team tasks are found by their message handler
+ * (00557310), worms by their physics step (004FCDF0). A team task: +0x2C the game, +0x38 its team. */
+static int readable(uintptr_t p, size_t n) {
+    MEMORY_BASIC_INFORMATION m;
+    return p && VirtualQuery((void *)p, &m, sizeof(m)) && m.State == MEM_COMMIT && !(m.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+           p + n >= p && p + n <= (uintptr_t)m.BaseAddress + m.RegionSize;
+}
+
+void __cdecl team_seen(uint32_t task) {
+    int i;
+    if (!trail_on || !last_world || n_team_tasks >= TRAIL_TEAMS || !readable(task, 0x50) || *(uint32_t *)(task + 0x2c) != (uint32_t)(uintptr_t)last_world)
+        return;
+    for (i = 0; i < n_team_tasks; i++) if (team_tasks[i] == task) return;
+    team_tasks[n_team_tasks] = task;
+    team_flags[n_team_tasks] = 0;
+    n_team_tasks++;
+}
+
+void __cdecl worm_seen(uint32_t obj) {
+    int i;
+    if (!trail_on || !obj || *(uint32_t *)obj != VA(WORM_VTABLE_VA) || n_worm_objs >= TRAIL_WORMS) return;
+    for (i = 0; i < n_worm_objs; i++) if (worm_objs[i] == obj) return;
+    worm_objs[n_worm_objs++] = obj;
+}
+
+static void trail_reset(void) {
+    int k;
+    n_team_tasks = 0;
+    n_worm_objs = 0;
+    trail_show = -1;
+    trail_owner = -1;
+    trail_visible = 0;
+    trail_turn = 0;
+    trail_multi = 0;
+    if (trails) for (k = 0; k < TRAIL_TEAMS * TRAIL_PER_TEAM; k++) trails[k].n = 0;
+}
+
+/* a team's current worm and where it is (px); 0 when it isn't known */
+static int team_worm(uintptr_t task, void *world, double *x, double *y) {
+    const int32_t team = *(int32_t *)(task + 0x38), index = *(int32_t *)(task + 0x48);
+    int i;
+    for (i = 0; i < n_worm_objs; i++) {
+        const uintptr_t o = worm_objs[i];
+        if (*(int32_t *)(o + 0xfc) == team && *(int32_t *)(o + 0x100) == index) {
+            *x = *(int32_t *)(o + 0x84) / 65536.0;
+            *y = *(int32_t *)(o + 0x88) / 65536.0;
+            (void)world;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void trail_add(team_trail *t, double x, double y, int own) {
+    tpoint *e, *p;
+    e = t->n ? &t->pt[t->n - 1] : NULL;
+    if (e && fabs(x - e->x) < 2.0 && fabs(y - e->y) < 2.0 && e->own == own) return;
+    if (t->n == t->cap && t->cap < TRAIL_MAX) {
+        int cap = t->cap ? t->cap * 2 : 256;
+        tpoint *np = (tpoint *)realloc(t->pt, sizeof(tpoint) * (size_t)(cap > TRAIL_MAX ? TRAIL_MAX : cap));
+        if (!np) return;
+        t->pt = np;
+        t->cap = cap > TRAIL_MAX ? TRAIL_MAX : cap;
+        e = t->n ? &t->pt[t->n - 1] : NULL;
+    }
+    if (!t->cap) return;
+    if (t->n == TRAIL_MAX) {                /* (a long game: its oldest quarter dropped) */
+        memmove(t->pt, t->pt + TRAIL_MAX / 4, sizeof(tpoint) * (TRAIL_MAX - TRAIL_MAX / 4));
+        t->n -= TRAIL_MAX / 4;
+        t->pt[0].brk = 1;
+        e = &t->pt[t->n - 1];
+    }
+    p = &t->pt[t->n++];
+    p->x = (float)x; p->y = (float)y;
+    p->turn = trail_turn;
+    p->brk = (int16_t)(!e || fabs(x - e->x) > 80.0 || fabs(y - e->y) > 80.0);
+    p->own = (int16_t)own;
+}
+
+/* each frame, before WA's own drawing: the worms still there, turns starting and ending, the worm's place noted, the
+ * shown line hidden once the worm moves */
+static void trail_frame(void *world) {
+    int i, flagged = 0;
+    uintptr_t owner_task = 0;
+    double x, y;
+    if (!trail_on || !trails) return;
+    for (i = 0; i < n_worm_objs;) {
+        const uintptr_t o = worm_objs[i];
+        if (!readable(o, 0x104) || *(uint32_t *)o != VA(WORM_VTABLE_VA) || *(uint32_t *)(o + 0x2c) != (uint32_t)(uintptr_t)world)
+            worm_objs[i] = worm_objs[--n_worm_objs];
+        else
+            i++;
+    }
+    for (i = 0; i < n_team_tasks;) {
+        const uintptr_t t = team_tasks[i];
+        int team, flag;
+        if (!readable(t, 0x50) || *(uint32_t *)(t + 0x2c) != (uint32_t)(uintptr_t)world) {
+            team_tasks[i] = team_tasks[--n_team_tasks];
+            team_flags[i] = team_flags[n_team_tasks];
+            continue;
+        }
+        team = *(int32_t *)(t + 0x38);
+        flag = *(int32_t *)(t + 0x3c) != 0;
+        if (team >= 0 && team < TRAIL_TEAMS) {
+            if (flag && !team_flags[i]) {           /* its turn starts: its worm's line shown (the worm found below) */
+                trail_turn++;
+                trail_owner = team;
+                trail_visible = 1;
+                trail_show = -1;
+            } else if (!flag && team_flags[i] && team == trail_owner) {
+                trail_visible = 0;
+                trail_show = -1;
+                if (test_mode) say("test: team %d's turn ended (turn %d)", team, trail_turn);
+            }
+            if (flag) flagged++;
+            if (team == trail_owner) owner_task = t;
+        }
+        team_flags[i] = flag;
+        i++;
+    }
+    if (test_mode) {                        /* (test: the turn's worm fields, as they change) */
+        static int32_t prev[TRAIL_TEAMS + 2];
+        int k, changed = 0;
+        int32_t now[TRAIL_TEAMS + 2];
+        now[0] = *(int32_t *)((char *)world + 0x45e4); now[1] = *(int32_t *)((char *)world + 0x4620);
+        for (k = 0; k < n_team_tasks && k < TRAIL_TEAMS; k++) now[2 + k] = *(int32_t *)(team_tasks[k] + 0x38) * 100 + *(int32_t *)(team_tasks[k] + 0x48) * 10 + (*(int32_t *)(team_tasks[k] + 0x3c) != 0);
+        for (k = 0; k < 2 + n_team_tasks && k < TRAIL_TEAMS + 2; k++) if (now[k] != prev[k]) changed = 1;
+        if (changed) {
+            char line[256];
+            int at = snprintf(line, sizeof(line), "test: frame %u: game+45E4 %d, +4620 %d; tasks (team*100+worm*10+turn):", frames, now[0], now[1]);
+            for (k = 0; k < n_team_tasks && k < TRAIL_TEAMS && at < 230; k++) at += snprintf(line + at, sizeof(line) - at, " %d", now[2 + k]);
+            say("%s", line);
+            memcpy(prev, now, sizeof(prev));
+        }
+    }
+    if (test_mode && frames % 60 == 30 && frames < 1500) {
+        char line[512];
+        int k, at = 0;
+        at += snprintf(line + at, sizeof(line) - at, "test: frame %u: %d worms", frames, n_worm_objs);
+        for (k = 0; k < n_worm_objs && at < 400; k++) {
+            const uintptr_t o = worm_objs[k];
+            at += snprintf(line + at, sizeof(line) - at, " [t%d n%d %.0f,%.0f]", *(int32_t *)(o + 0xfc), *(int32_t *)(o + 0x100),
+                           *(int32_t *)(o + 0x84) / 65536.0, *(int32_t *)(o + 0x88) / 65536.0);
+        }
+        for (k = 0; k < n_team_tasks && at < 480; k++)
+            at += snprintf(line + at, sizeof(line) - at, " task team %d turn %d worm %d;", *(int32_t *)(team_tasks[k] + 0x38),
+                           *(int32_t *)(team_tasks[k] + 0x3c), *(int32_t *)(team_tasks[k] + 0x48));
+        say("%s", line);
+    }
+    if (flagged > 1 && !trail_multi) { trail_multi = 1; say("several teams have the turn at once (real-time play?): no movement line"); }
+    if (trail_multi) return;
+    {   /* every worm, every frame (knocked about in other turns too: its line ends where it is); "own" while it is the
+         * current worm of the team that has (or last had) the turn */
+        const int owner_index = owner_task ? *(int32_t *)(owner_task + 0x48) : -1;
+        for (i = 0; i < n_worm_objs; i++) {
+            const uintptr_t o = worm_objs[i];
+            const int team = *(int32_t *)(o + 0xfc), index = *(int32_t *)(o + 0x100);
+            if (team < 0 || team >= TRAIL_TEAMS || index < 0 || index >= TRAIL_PER_TEAM) continue;
+            trail_add(&trails[team * TRAIL_PER_TEAM + index], *(int32_t *)(o + 0x84) / 65536.0, *(int32_t *)(o + 0x88) / 65536.0,
+                      team == trail_owner && index == owner_index);
+        }
+    }
+    if (trail_owner < 0 || !owner_task || !team_worm(owner_task, world, &x, &y)) return;
+    {
+        const int index = *(int32_t *)(owner_task + 0x48), slot = trail_owner * TRAIL_PER_TEAM + index;
+        team_trail *tr;
+        if (index < 0 || index >= TRAIL_PER_TEAM) return;
+        tr = &trails[slot];
+        if (!trail_visible) return;
+        if (slot != trail_show) {               /* the turn's worm: its last own turn bright */
+            int k;
+            trail_show = slot;
+            trail_have0 = 0;
+            for (trail_hl = 0, k = tr->n - 1; k >= 0 && !trail_hl; k--) if (tr->pt[k].own && tr->pt[k].turn < trail_turn) trail_hl = tr->pt[k].turn;
+            if (trail_hl) {
+                int n_hl = 0;
+                for (k = 0; k < tr->n; k++) n_hl += tr->pt[k].own && tr->pt[k].turn == trail_hl;
+                say("turn %d: team %d's worm %d: its line shown (%d points; its last own turn, turn %d, bright: %d of them)",
+                    trail_turn, trail_owner, index, tr->n, trail_hl, n_hl);
+            }
+        }
+        if (!trail_have0) { trail_x0 = x; trail_y0 = y; trail_have0 = 1; }     /* hidden once the worm moves */
+        else if (fabs(x - trail_x0) > 6.0 || fabs(y - trail_y0) > 6.0) {
+            if (trail_hl) say("team %d's worm %d moved: its line hidden", trail_owner, index);
+            trail_visible = 0;
+            trail_show = -1;
+        }
+    }
+}
+
+/* The line is drawn into a coverage mask first (each pixel the most any segment covers it, times that segment's
+ * opacity), then blended onto the map once: where short segments overlap, the line keeps its look. */
+static uint8_t *trail_mask;
+static int trail_mask_n, mx1, my1, mx2, my2;
+
+/* one segment into the mask: anti-aliased, `half` pixels each side, opacity a */
+static void trail_segment(double x0, double y0, double x1, double y1, double half, double a) {
+    const double dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy, reach = half + 0.5, reach2 = reach * reach;
+    int X, Y, xa = (int)floor((x0 < x1 ? x0 : x1) - half - 1), xb = (int)ceil((x0 > x1 ? x0 : x1) + half + 1);
+    int ya = (int)floor((y0 < y1 ? y0 : y1) - half - 1), yb = (int)ceil((y0 > y1 ? y0 : y1) + half + 1);
+    if (xa < rv.x1) xa = rv.x1;
+    if (ya < rv.y1) ya = rv.y1;
+    if (xb > rv.x2) xb = rv.x2;
+    if (yb > rv.y2) yb = rv.y2;
+    if (xa >= xb || ya >= yb) return;
+    if (xa < mx1) mx1 = xa;
+    if (ya < my1) my1 = ya;
+    if (xb > mx2) mx2 = xb;
+    if (yb > my2) my2 = yb;
+    for (Y = ya; Y < yb; Y++) {
+        uint8_t *row = trail_mask + (size_t)Y * sw;
+        for (X = xa; X < xb; X++) {
+            const double px = X + 0.5 - x0, py = Y + 0.5 - y0;
+            double t = len2 > 0.0 ? (px * dx + py * dy) / len2 : 0.0, ex, ey, d2, cov;
+            uint8_t v;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            ex = px - t * dx; ey = py - t * dy;
+            d2 = ex * ex + ey * ey;
+            if (d2 >= reach2) continue;         /* (most of the box: no square root) */
+            cov = reach - sqrt(d2);
+            if (cov > 1.0) cov = 1.0;
+            v = (uint8_t)(cov * a * 255.0);
+            if (v > row[X]) row[X] = v;
+        }
+    }
+}
+
+/* the shown line onto the frame's map picture (WA's camera transform: screen = world - camera, whole pixels); points
+ * closer than 3 screen pixels to the last one drawn are passed over */
+static void trail_draw(const int32_t *camera) {
+    const team_trail *tr;
+    const double cx = (double)(camera[0] >> 16), cy = (double)(camera[1] >> 16);
+    double half = sh / 540.0, lx = 0.0, ly = 0.0;
+    int i, first = -1, n_hl = 0, k = 0, have = 0, X, Y;
+    if (!trail_visible || trail_show < 0 || !trail_hl || !trails) return;
+    if (trail_mask_n != sw * sh) {
+        free(trail_mask);
+        trail_mask = (uint8_t *)calloc((size_t)sw * sh, 1);
+        trail_mask_n = trail_mask ? sw * sh : 0;
+        if (!trail_mask) return;
+    }
+    tr = &trails[trail_show];
+    if (half < 1.25) half = 1.25;
+    mx1 = rv.x2; my1 = rv.y2; mx2 = rv.x1; my2 = rv.y1;
+    for (i = 0; i < tr->n; i++) if (tr->pt[i].own && tr->pt[i].turn == trail_hl) { if (first < 0) first = i; n_hl++; }
+    for (i = 0; i < tr->n; i++) {
+        const tpoint *b = &tr->pt[i];
+        const double bx = rv.ox + (b->x - cx) * rv.z, by = rv.oy + (b->y - cy) * rv.z;
+        double alpha;
+        if (b->turn >= trail_turn) { have = 0; continue; }   /* (not this turn's own start) */
+        if (b->own && b->turn == trail_hl) { k = i - first; alpha = 0.5 + 0.5 * k / (n_hl > 1 ? n_hl - 1 : 1); }
+        else if (!trail_all) { have = 0; continue; }
+        else alpha = 0.35;
+        if (!have || b->brk) { lx = bx; ly = by; have = 1; continue; }
+        if (fabs(bx - lx) < 3.0 && fabs(by - ly) < 3.0 && i + 1 < tr->n && !tr->pt[i + 1].brk) continue;
+        trail_segment(lx, ly, bx, by, half, alpha);
+        lx = bx; ly = by;
+    }
+    for (Y = my1; Y < my2; Y++) {               /* the mask onto the map, and cleared */
+        uint8_t *m = trail_mask + (size_t)Y * sw;
+        uint32_t *row = rgb + (size_t)Y * sw;
+        for (X = mx1; X < mx2; X++) {
+            const uint32_t w = m[X], o = row[X];
+            if (!w) continue;
+            m[X] = 0;
+            row[X] = ((((o >> 16) & 255u) * (255u - w) + 235u * w) / 255u) << 16 | ((((o >> 8) & 255u) * (255u - w) + 30u * w) / 255u) << 8 |
+                     (((o & 255u) * (255u - w) + 30u * w) / 255u);
+        }
+    }
+}
+
+/* ---- the readout: "150%" in WA's palette ------------------------------------------------------------------------- */
 /* the palette's whitest colour, and each colour's darker one (the readout's see-through box) */
 static void palette_tables(void *display) {
     const uint8_t *pal = (const uint8_t *)display + D_PALETTE;
@@ -625,22 +1405,25 @@ static int pow2(int v) { int p = 16; while (p < v) p <<= 1; return p; }
 
 static void draw_readout(void *display) {
     static const uint8_t bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
-    char *g = *(char **)((char *)display + D_GRID);
-    uint8_t *frame = g ? *(uint8_t **)(g + GR_DATA) : NULL;
-    int stride = g ? FIELD(g, GR_STRIDE) : 0, fw = g ? FIELD(g, GR_W) : 0, fh = g ? FIELD(g, GR_H) : 0;
+    uint8_t *frame = *(uint8_t **)VA(FRAME_PTR_VA);   /* (the renderer's frame: see queue_hook) */
+    int stride = *(int32_t *)VA(FRAME_W_VA), fw = stride, fh = *(int32_t *)VA(FRAME_H_VA);
     int pct = (int)floor(zoom_now * 100.0 + 0.5), m, x0, y0, x, y, level;
     double a = ind_alpha();
+    char text[48];
     if (a <= 0.02 || !frame || fw < 64 || fh < 64) return;
-    if (pct != ind_pct || fh != ind_lines || !ind_img) {   /* the picture, made again when the number changes */
+    snprintf(text, sizeof(text), "%d%%", pct);
+    if (strcmp(text, ind_text) || fh != ind_lines || !ind_img) {   /* the picture, made again when its text changes */
         int f;
         badge_size(fh, &f, &ind_bw, &ind_bh);
+        if (ind_bw > fw - 8) ind_bw = fw - 8;
         if (!ind_img || pow2(ind_bw) != ind_tw || pow2(ind_bh) != ind_th) {
             free(ind_img);
             ind_tw = pow2(ind_bw); ind_th = pow2(ind_bh);
             ind_img = (uint32_t *)malloc((size_t)ind_tw * ind_th * 4);
             if (!ind_img) return;
         }
-        if (!badge_paint(pct, f, ind_bw, ind_bh, ind_tw, ind_th, ind_img, ind_tw * 4)) return;
+        if (!badge_paint_text(text, f, ind_bw, ind_bh, ind_tw, ind_th, ind_img, ind_tw * 4)) { ind_text[0] = 0; return; }
+        snprintf(ind_text, sizeof(ind_text), "%s", text);
         ind_pct = pct; ind_lines = fh;
     }
     palette_tables(display);
@@ -666,17 +1449,14 @@ static void draw_readout(void *display) {
 }
 
 /* ---- test mode: WA's frame as a BMP ------------------------------------------------------------------------------ */
-static void dump_frame(void *display, const char *name) {
-    char *g = *(char **)((char *)display + D_GRID), path[MAX_PATH + 64];
-    const uint8_t *frame = g ? *(uint8_t **)(g + GR_DATA) : NULL, *pal = (const uint8_t *)display + D_PALETTE;
-    int stride = g ? FIELD(g, GR_STRIDE) : 0, w = g ? FIELD(g, GR_W) : 0, h = g ? FIELD(g, GR_H) : 0, x, y;
+static void write_bmp(const char *name, int w, int h, const uint32_t *px) {
+    char path[MAX_PATH + 64];
     uint8_t hdr[54] = {'B', 'M'}, *row;
-    uint32_t rowb, img, fsz, off = 54, isz = 40;
-    int32_t hgt;
+    uint32_t rowb = ((uint32_t)w * 3 + 3) & ~3u, img = rowb * (uint32_t)h, fsz = 54 + img, off = 54, isz = 40;
+    int32_t hgt = -h;
     uint16_t planes = 1, bpp = 24;
+    int x, y;
     FILE *f;
-    if (!frame || w <= 0 || h <= 0) return;
-    rowb = ((uint32_t)w * 3 + 3) & ~3u; img = rowb * h; fsz = 54 + img; hgt = -h;
     snprintf(path, sizeof(path), "%s\\%s.bmp", dump_dir, name);
     if (!(f = fopen(path, "wb"))) return;
     memcpy(hdr + 2, &fsz, 4); memcpy(hdr + 10, &off, 4); memcpy(hdr + 14, &isz, 4); memcpy(hdr + 18, &w, 4);
@@ -685,8 +1465,8 @@ static void dump_frame(void *display, const char *name) {
     row = (uint8_t *)calloc(rowb, 1);
     for (y = 0; row && y < h; y++) {
         for (x = 0; x < w; x++) {
-            const uint8_t *p = pal + 4 * frame[(size_t)y * stride + x];
-            row[3 * x] = p[2]; row[3 * x + 1] = p[1]; row[3 * x + 2] = p[0];
+            uint32_t c = px[(size_t)y * w + x];
+            row[3 * x] = (uint8_t)c; row[3 * x + 1] = (uint8_t)(c >> 8); row[3 * x + 2] = (uint8_t)(c >> 16);
         }
         fwrite(row, 1, rowb, f);
     }
@@ -695,8 +1475,36 @@ static void dump_frame(void *display, const char *name) {
     say("test: saved %s (%dx%d, zoom %.3f)", path, w, h, zoom_now);
 }
 
+/* WA's 8-bit frame through its palette, and (when this frame has one) the true-colour frame */
+static void dump_frame(void *display, const char *name) {
+    char tcname[96];
+    const uint8_t *frame = *(const uint8_t **)VA(FRAME_PTR_VA);
+    int stride = *(int32_t *)VA(FRAME_W_VA), w = stride, h = *(int32_t *)VA(FRAME_H_VA), x, y;
+    uint32_t *px;
+    (void)display;
+    if (!frame || w <= 0 || h <= 0 || !(px = (uint32_t *)malloc((size_t)w * h * 4))) return;
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) px[(size_t)y * w + x] = pal32[frame[(size_t)y * stride + x]];
+    write_bmp(name, w, h, px);
+    if (tc.on && compose((uint8_t *)px, w * 4, w, h)) {
+        snprintf(tcname, sizeof(tcname), "%s-truecolour", name);
+        write_bmp(tcname, w, h, px);
+    }
+    free(px);
+}
+
 /* 100% for a moment, out to the farthest, in to the closest, back to 100%; WA's frame saved in each */
+static int test_switch_w, test_switch_h;
+static double test_zoom;                /* WKMAPZOOM_TEST_ZOOM: one zoom all along, no zoom script */
 static void test_script(void *display) {
+    static int shown_at = -1, trail_dumps;
+    if (trail_visible && trail_show >= 0 && trail_hl && shown_at < 0) shown_at = (int)frames;
+    if (!(trail_visible && trail_show >= 0 && trail_hl)) shown_at = -1;
+    if (shown_at >= 0 && (int)frames == shown_at + 20 && trail_dumps < 2) {
+        char name[32];
+        snprintf(name, sizeof(name), "trail-%d", ++trail_dumps);
+        dump_frame(display, name);
+    }
+    if (test_zoom > 0.0) return;
     switch (frames) {
     case 190: dump_frame(display, "1-zoom100"); set_goal(zoom_lo, "test script"); break;
     case 260: dump_frame(display, "2-zoomout-readout"); break;
@@ -704,7 +1512,23 @@ static void test_script(void *display) {
     case 460: dump_frame(display, "4-zoomin-readout"); break;
     case 590: dump_frame(display, "5-zoomin"); set_goal(1.0, "test script"); break;
     case 660: dump_frame(display, "6-zoom100-readout"); break;
+    case 670: if (test_switch_w) set_goal(0.5, "test script: zoomed for the switch"); break;   /* (the switch zoomed: the
+                                                                                             owner's crash, 2026-11-22) */
+    case 700: if (test_switch_w) escmenu_ask(test_switch_w, test_switch_h); break;
+    case 703: if (test_switch_w) dump_frame(display, "8a-just-switched"); break;
+    case 720: if (test_esc) escmenu_test_open(); break;
+    case 760:
+        if (test_switch_w) set_goal(0.5, "test script");
+        if (test_esc) { dump_frame(display, "9-escmenu"); escmenu_test_list(); }
+        break;
+    case 790: if (test_esc) dump_frame(display, "10-escmenu-list"); break;
+    case 840: if (test_switch_w) dump_frame(display, "8-switched-zoom50"); break;
     case 900: dump_frame(display, "7-zoom100"); break;
+    case 905: case 910: {                   /* numpad + then numpad -, posted to WA's own window (through the message hook) */
+        HWND wnd = (HWND)(uintptr_t)*(uint32_t *)VA(0x6b390cu);
+        if (wnd) PostMessageA(wnd, WM_KEYDOWN, frames == 905 ? VK_ADD : VK_SUBTRACT, 1);
+        break;
+    }
     }
 }
 
@@ -713,7 +1537,9 @@ static void __fastcall hook_render(void *runtime) {
     void *world = runtime ? *(void **)((char *)runtime + RT_WORLD) : NULL;
     void *display = world ? *(void **)((char *)world + WO_DISPLAY) : NULL;
     frame_display = NULL;
+    frame_grid = NULL;
     frame_zoom = 1.0;
+    tc.on = 0;
     if (display && (uintptr_t)VTBL(display) == VA(DISPLAY_VTABLE_VA) && fit_size(FIELD(display, D_W), FIELD(display, D_H))) {
         if (world != last_world) {          /* a new game: 100% */
             last_world = world;
@@ -722,16 +1548,25 @@ static void __fastcall hook_render(void *runtime) {
             logged_split = 0;
             clock_last.QuadPart = 0;
             ind_changed = GetTickCount() - 60000;
+            land_free();
+            trail_reset();
+            if (test_mode && test_zoom > 0.0) zoom_now = zoom_goal = zoom_clamp(test_zoom, zoom_lo, zoom_hi);
             say("a new game (world %p)", world);
         }
+        palette_rgb(display);
+        if (!land_ok) land_setup(display);
+        trail_frame(world);
         frame_display = display;
+        frame_grid = *(void **)((char *)display + D_GRID);
         frame_zoom = zoom_now;
         live_tick = GetTickCount();
     }
+    if (esc_menu) escmenu_frame(runtime);
     original_render(runtime);
     if (frame_display) {
         frames++;
         draw_readout(display);
+        if (tc.on && tc_ok) present_ready();
         if (test_mode) test_script(display);   /* (the frame as shown: with the readout) */
         advance();
     }
@@ -741,20 +1576,34 @@ static void __fastcall hook_render(void *runtime) {
 
 static LRESULT CALLBACK on_message(int code, WPARAM wp, LPARAM lp) {
     MSG *m = (MSG *)lp;
-    if (code == HC_ACTION && wp == PM_REMOVE && m && wbuf && GetTickCount() - live_tick < 1000) {
-        if (m->message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
-            set_goal(zoom_step(zoom_goal, GET_WHEEL_DELTA_WPARAM(m->wParam) / (double)WHEEL_DELTA, cfg.step), "Ctrl + wheel");
-            m->message = WM_NULL;
-        } else if ((m->message == WM_MBUTTONDOWN || m->message == WM_MBUTTONUP || m->message == WM_MBUTTONDBLCLK) &&
-                   (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
-            if (m->message != WM_MBUTTONUP) set_goal(1.0, "Ctrl + middle click");
-            m->message = WM_NULL;
+    if (code == HC_ACTION && wp == PM_REMOVE && m) {
+        if (esc_menu && escmenu_message(m)) m->message = WM_NULL;
+        else if (wbuf && GetTickCount() - live_tick < 1000) {
+            if (m->message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
+                set_goal(zoom_step(zoom_goal, GET_WHEEL_DELTA_WPARAM(m->wParam) / (double)WHEEL_DELTA, cfg.step), "Ctrl + wheel");
+                m->message = WM_NULL;
+            } else if ((m->message == WM_MBUTTONDOWN || m->message == WM_MBUTTONUP || m->message == WM_MBUTTONDBLCLK) &&
+                       (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
+                if (m->message != WM_MBUTTONUP) set_goal(1.0, "Ctrl + middle click");
+                m->message = WM_NULL;
+            } else if (numpad_keys && m->message == WM_KEYDOWN &&
+                       (m->wParam == VK_ADD || m->wParam == VK_SUBTRACT || m->wParam == VK_MULTIPLY)) {
+                if (m->wParam == VK_MULTIPLY) set_goal(1.0, "numpad *");
+                else set_goal(zoom_step(zoom_goal, m->wParam == VK_ADD ? 1.0 : -1.0, cfg.step), "numpad");
+                m->message = WM_NULL;
+            }
         }
     }
     return CallNextHookEx(msg_hook, code, wp, lp);
 }
 
 /* ---- start-up ---------------------------------------------------------------------------------------------------- */
+static int ini_flag(const char *ini, const char *key, int dflt) {
+    char v[16];
+    if (!GetPrivateProfileStringA("wkMapZoom", key, "", v, sizeof(v), ini) || !v[0]) return dflt;
+    return atoi(v) != 0 || !lstrcmpiA(v, "on") || !lstrcmpiA(v, "yes") || !lstrcmpiA(v, "true");
+}
+
 static void read_settings(const char *exe) {
     char ini[MAX_PATH], v[64], *slash;
     strcpy(ini, exe);
@@ -766,7 +1615,7 @@ static void read_settings(const char *exe) {
     READ_D("MaxIn", max_in);
     READ_D("Step", step);
 #undef READ_D
-    if (GetPrivateProfileStringA("wkMapZoom", "Smooth", "", v, sizeof(v), ini) && v[0]) cfg.smooth = atoi(v) != 0;
+    cfg.smooth = ini_flag(ini, "Smooth", cfg.smooth);
     if (GetPrivateProfileStringA("wkMapZoom", "Filter", "", v, sizeof(v), ini) && v[0]) filter_smooth = lstrcmpiA(v, "nearest") != 0;
     if (GetPrivateProfileStringA("wkMapZoom", "Indicator", "", v, sizeof(v), ini) && v[0])
         ind_mode = !lstrcmpiA(v, "off") || !strcmp(v, "0") ? IND_OFF : !lstrcmpiA(v, "always") ? IND_ALWAYS : IND_ZOOMING;
@@ -774,6 +1623,18 @@ static void read_settings(const char *exe) {
         static const char *const places[] = {"top-right", "top-left", "top", "bottom-right", "bottom-left", "bottom"};
         unsigned i;
         for (i = 0; i < sizeof(places) / sizeof(places[0]); i++) if (!lstrcmpiA(v, places[i])) ind_place = (int)i;
+    }
+    numpad_keys = ini_flag(ini, "NumpadKeys", 1);
+    if (GetPrivateProfileStringA("wkMapZoom", "TurnLine", "", v, sizeof(v), ini) && v[0]) {
+        trail_on = lstrcmpiA(v, "off") && strcmp(v, "0");
+        trail_all = lstrcmpiA(v, "last") != 0;
+    }
+    true_colour = ini_flag(ini, "TrueColour", 1);
+    colour_maps = ini_flag(ini, "ColourMaps", 1);
+    esc_menu = ini_flag(ini, "EscMenu", 1);
+    if (GetPrivateProfileStringA("wkMapZoom", "MapTheme", "", v, sizeof(v), ini) && v[0]) {
+        int t = colourmap_theme(v);
+        if (t >= 0) map_theme = t; else say("MapTheme=%s: not one of WA's themes (Forest is used)", v);
     }
     zoom_cfg_sane(&cfg);
 }
@@ -787,15 +1648,38 @@ static int runs_without_screen(void) {
     return 0;
 }
 
+typedef struct { uint32_t va; const unsigned char *bytes; unsigned n; void *detour; void **orig; const char *name; } hook_def;
+
 static void install(void) {
     static const unsigned char render_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x20};
     static const unsigned char queue_bytes[] = {0x83, 0xec, 0x1c, 0x53, 0x55, 0x8b, 0x6c, 0x24, 0x28};
     static const unsigned char clamp_bytes[] = {0xc1, 0xe0, 0x10, 0x99, 0x2b, 0xc2, 0x53};
+    static const unsigned char follow_bytes[] = {0x51, 0xc1, 0xe0, 0x10, 0x99, 0x2b, 0xc2, 0x8b, 0xc8};
+    static const unsigned char bitmap_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x24, 0x53, 0x56};
+    static const unsigned char fill_bytes[] = {0x8b, 0x81, 0x60, 0x35, 0x00, 0x00, 0x01, 0x44, 0x24, 0x04};
+    static const unsigned char grid_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x8b, 0x4d, 0x10, 0x8b, 0x45, 0x18};
+    static const unsigned char pixc_bytes[] = {0x8b, 0x54, 0x24, 0x04, 0x3b, 0x51, 0x1c, 0x7c, 0x25};
+    static const unsigned char pix_bytes[] = {0x8b, 0x41, 0x10, 0x0f, 0xaf, 0x44, 0x24, 0x08, 0x03, 0x41, 0x08};
+    static const unsigned char vline_bytes[] = {0x8b, 0x41, 0x10, 0x8b, 0x54, 0x24, 0x0c, 0x56, 0x8b, 0x74, 0x24, 0x0c};
+    static const unsigned char gfill_bytes[] = {0x8b, 0x44, 0x24, 0x14, 0x8b, 0x54, 0x24, 0x10, 0x50};
     static const unsigned char order_bytes[] = {0x8b, 0x44, 0x24, 0x04, 0x8b, 0x08, 0x8b, 0x54, 0x24, 0x08};
-    char exe[MAX_PATH], path[MAX_PATH];
+    const hook_def hooks[] = {
+        {GAME_RENDER_VA, render_bytes, sizeof(render_bytes), (void *)hook_render, (void **)&original_render, "GameRender"},
+        {QUEUE_VA, queue_bytes, sizeof(queue_bytes), (void *)thunk_queue, &orig_queue, "RenderDrawingQueue"},
+        {CLAMP_VA, clamp_bytes, sizeof(clamp_bytes), (void *)thunk_clamp, &orig_clamp, "the camera clamp"},
+        {FOLLOW_VA, follow_bytes, sizeof(follow_bytes), (void *)thunk_follow, &orig_follow, "the camera follow"},
+        {BITMAP_VA, bitmap_bytes, sizeof(bitmap_bytes), (void *)thunk_bitmap, &orig_bitmap, "the bitmap blit"},
+        {FILL_VA, fill_bytes, sizeof(fill_bytes), (void *)hook_fill, (void **)&original_fill, "the display fill"},
+        {GRID_VA, grid_bytes, sizeof(grid_bytes), (void *)thunk_grid, &orig_grid, "the sprite blit"},
+        {PIXEL_CLIPPED_VA, pixc_bytes, sizeof(pixc_bytes), (void *)thunk_pixel_clipped, &orig_pixel_clipped, "the pixel"},
+        {PIXEL_VA, pix_bytes, sizeof(pix_bytes), (void *)thunk_pixel, &orig_pixel, "the unclipped pixel"},
+        {VLINE_VA, vline_bytes, sizeof(vline_bytes), (void *)thunk_vline, &orig_vline, "the line"},
+        {GRID_FILL_VA, gfill_bytes, sizeof(gfill_bytes), (void *)thunk_grid_fill, &orig_grid_fill, "the grid fill"},
+    };
+    char exe[MAX_PATH], path[MAX_PATH], dir[MAX_PATH], *slash;
     DWORD n = GetModuleFileNameA(NULL, exe, sizeof(exe));
     MH_STATUS s;
-    uint8_t *render, *queue, *clamp;
+    unsigned i, taken = 0;
     if (GetEnvironmentVariableA("LOCALAPPDATA", path, sizeof(path))) {
         WIN32_FILE_ATTRIBUTE_DATA fa;
         strcat(path, "\\wkMapZoom");
@@ -807,53 +1691,82 @@ static void install(void) {
     if (!n || n >= sizeof(exe) || !wa_supported_image(exe)) { say("not the WA 3.8.1 this module knows: not installed"); return; }
     if (runs_without_screen()) { say("a /get... or repair run: not installed"); return; }
     base = (uintptr_t)GetModuleHandleA(NULL);
-    render = (uint8_t *)VA(GAME_RENDER_VA); queue = (uint8_t *)VA(QUEUE_VA); clamp = (uint8_t *)VA(CLAMP_VA);
-    if (memcmp(render, render_bytes, sizeof(render_bytes)) && *render != 0xe9) { say("unexpected code at 00533DC0: not installed"); return; }
-    if (memcmp(queue, queue_bytes, sizeof(queue_bytes)) && *queue != 0xe9) { say("unexpected code at 00542350: not installed"); return; }
-    if (memcmp(clamp, clamp_bytes, sizeof(clamp_bytes)) && *clamp != 0xe9) { say("unexpected code at 00542F10: not installed"); return; }
+    for (i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++) {
+        const uint8_t *at = (const uint8_t *)VA(hooks[i].va);
+        if (*at == 0xe9) taken++;
+        else if (memcmp(at, hooks[i].bytes, hooks[i].n)) { say("unexpected code at %08X (%s): not installed", hooks[i].va, hooks[i].name); return; }
+    }
     if (memcmp((void *)VA(QUEUE_ORDER_VA), order_bytes, sizeof(order_bytes))) { say("unexpected code at 00542330: not installed"); return; }
-    if (*render == 0xe9 || *queue == 0xe9 || *clamp == 0xe9)
-        say("another module hooks WA's drawing too (wkVista or WormForge's zoom?): use one zoom module at a time");
+    if (taken) {
+        say("another module hooks WA's drawing too (wkVista or WormForge's zoom?): not installed -- use one zoom module at a time");
+        return;
+    }
     read_settings(exe);
     QueryPerformanceFrequency(&clock_freq);
     test_mode = GetEnvironmentVariableA("WKMAPZOOM_TEST", path, sizeof(path)) > 0;
     if (test_mode) {
         DWORD k = GetEnvironmentVariableA("WKMAPZOOM_DUMP", dump_dir, sizeof(dump_dir));
+        char res[32];
+        int tw = 960, th = 540;
         if (!k || k >= sizeof(dump_dir)) {
             GetEnvironmentVariableA("LOCALAPPDATA", dump_dir, sizeof(dump_dir) - 32);
             strcat(dump_dir, "\\wkMapZoom\\test");
         }
         CreateDirectoryA(dump_dir, NULL);
-        {
-            int tw = 960, th = 540;
-            char res[32];
-            if (GetEnvironmentVariableA("WKMAPZOOM_TEST_RES", res, sizeof(res)) && sscanf(res, "%dx%d", &tw, &th) == 2 &&
-                (tw < 640 || th < 480 || tw > 7680 || th > 4320)) { tw = 960; th = 540; }
-            *(int32_t *)VA(OPT_WINDOWED_VA) = 1;
-            *(int32_t *)VA(OPT_DISPLAY_X_VA) = tw; *(int32_t *)VA(OPT_DISPLAY_Y_VA) = th;
-            *(int32_t *)VA(OPT_WINDOW_X_VA) = tw; *(int32_t *)VA(OPT_WINDOW_Y_VA) = th;
-            *(int32_t *)VA(OPT_RENDERER_VA) = 4;
-            say("test mode: windowed %dx%d, scripted zoom, frames to %s", tw, th, dump_dir);
-        }
+        if (GetEnvironmentVariableA("WKMAPZOOM_TEST_RES", res, sizeof(res)) && sscanf(res, "%dx%d", &tw, &th) == 2 &&
+            (tw < 640 || th < 480 || tw > 7680 || th > 4320)) { tw = 960; th = 540; }
+        if (GetEnvironmentVariableA("WKMAPZOOM_TEST_SWITCH", res, sizeof(res)) &&
+            (sscanf(res, "%dx%d", &test_switch_w, &test_switch_h) != 2 || test_switch_w < 640 || test_switch_h < 480))
+            test_switch_w = test_switch_h = 0;
+        test_fullcolour = GetEnvironmentVariableA("WKMAPZOOM_TEST_FULLCOLOUR", res, sizeof(res)) > 0;
+        test_esc = GetEnvironmentVariableA("WKMAPZOOM_TEST_ESC", res, sizeof(res)) > 0;
+        if (GetEnvironmentVariableA("WKMAPZOOM_TEST_ZOOM", res, sizeof(res)) > 0) test_zoom = atof(res);
+        *(int32_t *)VA(OPT_WINDOWED_VA) = 1;
+        *(int32_t *)VA(OPT_DISPLAY_X_VA) = tw; *(int32_t *)VA(OPT_DISPLAY_Y_VA) = th;
+        *(int32_t *)VA(OPT_WINDOW_X_VA) = tw; *(int32_t *)VA(OPT_WINDOW_Y_VA) = th;
+        *(int32_t *)VA(OPT_RENDERER_VA) = 4;
+        say("test mode: windowed %dx%d, scripted zoom, frames to %s", tw, th, dump_dir);
     }
+    say("WA starts at %dx%d, %s, renderer %d (its options as read)", *(int32_t *)VA(OPT_DISPLAY_X_VA), *(int32_t *)VA(OPT_DISPLAY_Y_VA),
+        *(int32_t *)VA(OPT_WINDOWED_VA) ? "windowed" : "fullscreen", *(int32_t *)VA(OPT_RENDERER_VA));
     s = MH_Initialize();
-    if (s == MH_OK) s = MH_CreateHook(render, (void *)hook_render, (void **)&original_render);
-    if (s == MH_OK) s = MH_CreateHook(queue, (void *)thunk_queue, &orig_queue);
-    if (s == MH_OK) s = MH_CreateHook(clamp, (void *)thunk_clamp, &orig_clamp);
-    if (s == MH_OK) {   /* the fills: only on WA 3.8.1's own code (else WA fills, on one thread, as ever) */
-        static const unsigned char fill_bytes[] = {0x8b, 0x81, 0x60, 0x35, 0x00, 0x00, 0x01, 0x44, 0x24, 0x04};
-        uint8_t *fillp = (uint8_t *)VA(FILL_VA);
-        if (memcmp(fillp, fill_bytes, sizeof(fill_bytes)) ||
-            MH_CreateHook(fillp, (void *)hook_fill, (void **)&original_fill) != MH_OK) say("the fills stay WA's own");
+    for (i = 0; s == MH_OK && i < sizeof(hooks) / sizeof(hooks[0]); i++)
+        if ((s = MH_CreateHook((void *)VA(hooks[i].va), hooks[i].detour, hooks[i].orig)) != MH_OK)
+            say("could not hook %s (%d)", hooks[i].name, (int)s);
+    if (s == MH_OK) {
+        if (true_colour) tc_ok = present_install(base, compose, say);
+        strcpy(dir, exe);
+        if ((slash = strrchr(dir, '\\')) != NULL) *slash = 0;
+        if (colour_maps && !colourmap_install(base, dir, map_theme, say)) colour_maps = 0;
+        if (trail_on) {                     /* (the team tasks: only on WA 3.8.1's own code, or another module's hook) */
+            static const unsigned char team_bytes[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x64, 0xa1, 0x00, 0x00, 0x00, 0x00};
+            static const unsigned char physics_bytes[] = {0x83, 0xec, 0x08, 0x53, 0x8b, 0x5c, 0x24, 0x14};
+            const uint8_t *tp = (const uint8_t *)VA(TEAM_HANDLER_VA), *pp = (const uint8_t *)VA(PHYSICS_VA);
+            trails = (team_trail *)calloc(TRAIL_TEAMS * TRAIL_PER_TEAM, sizeof(team_trail));
+            if (!trails || (memcmp(tp, team_bytes, sizeof(team_bytes)) && *tp != 0xe9) ||
+                (memcmp(pp, physics_bytes, sizeof(physics_bytes)) && *pp != 0xe9) ||
+                MH_CreateHook((void *)tp, (void *)thunk_team, &orig_team) != MH_OK) {
+                trail_on = 0;
+                say("the movement line is unavailable");
+            } else if (MH_CreateHook((void *)pp, (void *)thunk_physics, &orig_physics) != MH_OK) {
+                MH_RemoveHook((void *)tp);
+                trail_on = 0;
+                say("the movement line is unavailable");
+            }
+        }
+        if (esc_menu && !escmenu_install(base, say, !test_mode)) esc_menu = 0;
+        s = MH_EnableHook(MH_ALL_HOOKS);
     }
-    if (s == MH_OK) s = MH_EnableHook(MH_ALL_HOOKS);
     installed = s == MH_OK;
     if (installed) {
         msg_hook = SetWindowsHookExA(WH_GETMESSAGE, on_message, self, GetCurrentThreadId());
         if (!msg_hook) say("could not watch the mouse wheel (error %lu)", GetLastError());
     }
-    say("wkMapZoom %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), Ctrl + middle click 100%%",
-        installed ? "ready" : "failed", (unsigned)base, 100.0 / cfg.max_out, cfg.max_in * 100.0);
+    say("wkMapZoom %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), Ctrl + middle click 100%%%s; "
+        "true colour %s, full-colour maps %s, Esc menu resolution %s, movement line %s",
+        installed ? "ready" : "failed", (unsigned)base, 100.0 / cfg.max_out, cfg.max_in * 100.0,
+        numpad_keys ? ", numpad + / - / *" : "", tc_ok ? "on (Direct3D 9)" : "off", colour_maps ? "on" : "off",
+        esc_menu ? "on" : "off", trail_on ? (trail_all ? "on (whole game)" : "on (last turn)") : "off");
 }
 
 BOOL WINAPI DllMain(HINSTANCE dll, DWORD reason, LPVOID reserved) {

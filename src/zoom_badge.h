@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #define BADGE_KEY 0x00ff00ffu           /* GDI's "nothing here" colour (outside the rounded box) */
 
@@ -17,9 +18,12 @@ static void badge_size(int screen_h, int *font, int *bw, int *bh) {
     *bh = f * 8 / 5;
 }
 
-/* paints the readout for `pct` into `out` (tw x th pixels, A8R8G8B8 rows `pitch` bytes apart): the bw x bh box at the
- * top left, everything else clear. Outside the box alpha 0, the box's black 60% opaque, the number opaque white. */
-static int badge_paint(int pct, int f, int bw, int bh, int tw, int th, uint32_t *out, int pitch) {
+/* the box width for a short message instead of the number (e.g. "Look-ahead camera: on") */
+static inline int badge_text_width(int f, const char *text) { return f * 2 + (int)strlen(text) * f * 11 / 20; }
+
+/* paints a readout box with `text` into `out` (tw x th pixels, A8R8G8B8 rows `pitch` bytes apart): the bw x bh box at
+ * the top left, everything else clear. Outside the box alpha 0, the box's black 60% opaque, the text opaque white. */
+static int badge_paint_text(const char *text, int f, int bw, int bh, int tw, int th, uint32_t *out, int pitch) {
     BITMAPINFO bi;
     uint32_t *px = NULL;
     HDC dc;
@@ -28,7 +32,6 @@ static int badge_paint(int pct, int f, int bw, int bh, int tw, int th, uint32_t 
     HBRUSH b;
     HGDIOBJ old_pen, old_brush;
     RECT rc;
-    char text[16];
     int x, y;
     memset(&bi, 0, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
@@ -51,7 +54,6 @@ static int badge_paint(int pct, int f, int bw, int bh, int tw, int th, uint32_t 
     old_font = (HFONT)SelectObject(dc, font);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(255, 255, 255));
-    snprintf(text, sizeof(text), "%d%%", pct);
     rc.left = 0; rc.top = 0; rc.right = bw; rc.bottom = bh;
     DrawTextA(dc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dc, old_font);
@@ -69,5 +71,12 @@ static int badge_paint(int pct, int f, int bw, int bh, int tw, int th, uint32_t 
     DeleteObject(bmp);
     DeleteDC(dc);
     return 1;
+}
+
+/* the readout for `pct` ("150%") */
+static inline int badge_paint(int pct, int f, int bw, int bh, int tw, int th, uint32_t *out, int pitch) {
+    char text[16];
+    snprintf(text, sizeof(text), "%d%%", pct);
+    return badge_paint_text(text, f, bw, bh, tw, th, out, pitch);
 }
 #endif
