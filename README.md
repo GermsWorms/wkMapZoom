@@ -42,7 +42,8 @@ Uninstall: delete `wkMapZoom.dll`.
   big screens. `MaxOut=2` in `wkMapZoom.ini` stops at 50%.
 - It doesn't touch WA's renderer, so it should work with any renderer, full screen or windowed, and through a
   resolution change in game. Tested so far: Direct3D 9, windowed.
-- Don't run it together with another zoom module (wkVista, WormForge's zoom): they all take over WA's map drawing.
+- Don't run it together with another zoom module (wkZoom, wkVista, WormForge's zoom): they all take over WA's map
+  drawing, and wkZoom also uses Ctrl + mouse wheel (for its HUD scale). Keep one zoom module in the WA folder at a time.
 - Log: `%LOCALAPPDATA%\wkMapZoom\wkMapZoom.log`.
 
 ## Settings (`wkMapZoom.ini`, all optional)
@@ -80,6 +81,19 @@ Needs a 32-bit MinGW gcc (for example `C:\MinGW\bin\gcc.exe`) and PowerShell:
 .\install.ps1               # copies it into the Steam WA folder (-Game <folder> for another one)
 .\install.ps1 -Remove
 ```
+
+## Other zoom modules for W:A
+
+- [wkZoom](https://www.tus-wa.com/files/file-3430) by Sycotropic (TUS, August 2026): smooth camera zoom on the mouse
+  wheel plus a separately adjustable HUD scale (Ctrl + wheel), and `/zoom` and `/hud` chat commands. Its zoom works
+  within the resolution the game starts at.
+- [wkVista](https://github.com/ropahektic/wkVista) by ropahektic: zoom in (1x to 4x) with the HUD at normal size, plus
+  full-colour maps and true-colour output.
+- [WormForge](https://github.com/EdLud/WormForge) by EdLud: a Lua modding API whose zoom (up to 4x) builds on wkVista's.
+
+What wkMapZoom adds: zooming **out** past the game's own resolution (down to 25%, without changing WA's resolution),
+pixel averaging so thin walls stay visible when zoomed out, and an on-screen zoom number. What it doesn't do: the HUD
+keeps its normal size (wkZoom lets you scale it).
 
 ## Credits and licence
 
