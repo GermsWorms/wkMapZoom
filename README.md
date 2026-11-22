@@ -14,10 +14,19 @@ Also in the module:
   a 64-colour copy it can load, and you see the map's own colours wherever the land hasn't been blown up.
 - **Resolution in the Esc menu.** WA's Esc menu gets a Resolution list (your monitor's modes) and a Fullscreen /
   Windowed switch, applied at once without restarting WA.
+- **Options in the Esc menu.** "Map zoom options" in WA's Esc menu opens the module's options: auto zoom on / off, how
+  far it may zoom out and in, the red line, and the zoom number. Click an option to change it; it is saved in
+  `wkMapZoom.ini` at once.
 - **Movement line.** When your turn starts, a red line shows where the worm you are playing has been: its last turn
   bright, fading in towards where it stopped (so you can see which way you were going), everything else dimmer (its
   earlier turns, and being knocked about in other players' turns, so the line always ends at the worm). It goes as soon
-  as you move. It follows the worm itself, so teleports (and the cursor while you aim them) are not drawn.
+  as you move, or with "stays" it stays all turn. It follows the worm itself, so teleports (and the cursor while you
+  aim them) are not drawn.
+- **Auto zoom** (Ctrl + A, the Esc menu, or `AutoZoom=1`): the map zooms on its own to fit the space around your worm.
+  Where it opens up it zooms out, already as you head into the open, and where it is tight (a time trial map) it zooms
+  in. In an ordinary map it stays at your zoom. It looks at where the walls actually are (thin 1-2 px walls too; blown-up
+  holes count as open), changes slowly, never zooms out past where the whole level fits the screen, and never moves the
+  camera. The wheel still works: your zoom is the base the auto zoom works from.
 - **Zoomed-in camera.** Zoomed in, the camera keeps your worm within the part of the map you can see.
 
 | 25% | 50% |
@@ -34,7 +43,9 @@ while the map, the worm and its name zoom.
 ## Install
 
 1. Download `wkMapZoom.dll` (and, if you want to change the settings, `wkMapZoom.ini`) from
-   [`release/`](release/) and put them in your Worms Armageddon folder, next to `WA.exe`.
+   [`release/`](release/) and put them in your Worms Armageddon folder, next to `WA.exe` (Steam: `...\steamapps\common\Worms
+   Armageddon`; GOG: usually `C:\Program Files (x86)\GOG Galaxy\Games\Worms Armageddon` or `C:\GOG Games\Worms Armageddon`).
+   WA must be 3.8.1 (the version is shown at the bottom of WA's main menu).
 2. In WA: **Options > Advanced >** tick **Load WormKit modules**.
 3. Start a game, hold Ctrl and scroll.
 
@@ -43,13 +54,15 @@ while the map, the worm and its name zoom.
 | **Ctrl + mouse wheel** | zoom in / out |
 | **Numpad + / −** | zoom in / out |
 | **Ctrl + middle click**, **numpad \*** | back to 100% |
-| **Esc** | WA's menu, now with Resolution and Display |
+| **Ctrl + A** | auto zoom on / off |
+| **Esc** | WA's menu, now with Resolution, Display and Map zoom options |
 
 Uninstall: delete `wkMapZoom.dll`.
 
 ## Notes
 
-- **WA 3.8.1 only.** The module checks `WA.exe` and does nothing on any other version.
+- **WA 3.8.1 only, Steam or GOG.** The module checks `WA.exe` (Steam's file, or any other whose game code is 3.8.1's
+  byte for byte, as GOG's is) and does nothing on any other version; the log says which it found.
 - **Only your own screen changes.** No game state is touched, so online games and replays stay in sync, and other
   players don't need the module. (A full-colour map you host reaches them as WA's 64-colour copy.)
 - **Zooming out shows you more of the map than other players see.** Say so before using it in league or competitive
@@ -79,11 +92,15 @@ Uninstall: delete `wkMapZoom.dll`.
 | `Indicator` | `zooming` | the zoom number: `zooming` (shown while zooming, then fades), `always` (stays while not at 100%), `off` |
 | `IndicatorPlace` | `top-right` | or `top-left`, `top`, `bottom-right`, `bottom-left`, `bottom` |
 | `NumpadKeys` | `1` | numpad + / − / \* zoom (0 = left to WA) |
+| `AutoZoom` | `0` | the auto zoom on (Ctrl + A and the Esc menu switch it, and save it here) |
+| `AutoZoomMin` | `0.35` | the furthest the auto zoom goes out (0.35 = 35%; 1 = never out) |
+| `AutoZoomMax` | `1.5` | the furthest the auto zoom goes in (1.5 = 150%; 1 = never in) |
 | `TurnLine` | `all` | the movement line at your turn's start: `all` (the whole game, its last turn bright), `last` (its last turn), `off` |
+| `TurnLineKeep` | `0` | 1 = the movement line stays all turn ("stays" in the Esc menu); 0 = it goes once you move |
 | `TrueColour` | `1` | true-colour output on Direct3D 9 (0 = WA's 256 colours) |
 | `ColourMaps` | `1` | full-colour PNG / JPEG maps in `User\SavedLevels` |
 | `MapTheme` | `Forest` | the WA theme full-colour maps get (the soil behind craters, the backdrop) |
-| `EscMenu` | `1` | Resolution and Display items in WA's Esc menu |
+| `EscMenu` | `1` | Resolution, Display and Map zoom options in WA's Esc menu |
 
 ## How it works
 
@@ -101,9 +118,14 @@ pixels as averaged, the HUD's as WA drew them).
 WA's camera clamp is given the size the zoomed view sees, so the camera reaches the level's edges, and zoomed in its
 camera follow is given the size of what you see, so it keeps up with the worm. The movement line follows the current
 worm of the team whose turn it is (WA's team tasks, and the worms themselves through their physics step), every 2 pixels it moves, and is
-drawn into the map's picture so it zooms with the map. The zoom number is drawn into WA's frame in WA's own palette.
+drawn into the map's picture so it zooms with the map. The auto zoom casts 16 rays, a pixel at a time, from the turn's
+worm and from where it is heading (its speed times 0.5 to 2 seconds) through the land several times a second. Each
+ray's end wants the zoom that puts it 80% of the way to the screen's edge in its direction; the 8 most open directions,
+averaged, say how open it is there: open zooms out, ordinary stays at 100%, tight zooms in. The zoom then eases there,
+slowly, and only after a clear change. The zoom number is drawn into WA's frame in WA's own palette.
 
-Hooks (WA 3.8.1, checked by the exact SHA-256 of `WA.exe` and the original bytes at each hook point):
+Hooks (WA 3.8.1, checked by the SHA-256 of `WA.exe`, or of its code section with its sections where 3.8.1 has them,
+and the original bytes at each hook point):
 `00533DC0` GameRender, `00542350` RenderDrawingQueue, `0056A700` BlitBitmapClipped, `0056B810` the display's fill,
 `004F6910` BlitSpriteRect, `004F9180` / `004F5E40` pixels, `004F9110` vertical line, `004F5D50` grid fill,
 `00542F10` ClampCameraToBounds, `00542F70` the camera follow, `0059CB30` / `0059CDE0` the Direct3D 9 backends' "show
@@ -118,7 +140,7 @@ Needs a 32-bit MinGW gcc (for example `C:\MinGW\bin\gcc.exe`) and PowerShell:
 
 ```powershell
 .\build.ps1                 # runs tests\*.c, then builds wkMapZoom.dll
-.\install.ps1               # copies it into the Steam WA folder (-Game <folder> for another one)
+.\install.ps1               # copies it into the Steam or GOG WA folder (-Game <folder> for another one)
 .\install.ps1 -Remove
 ```
 

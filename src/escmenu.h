@@ -17,4 +17,16 @@ void escmenu_ask(int w, int h);
 void escmenu_test_open(void);
 void escmenu_test_list(void);
 
+/* the module's own options, under a "Map zoom options" row of their own: each a row whose label shows its value and
+ * whose click changes it (the menu is laid out again to show the change) */
+typedef struct {
+    int (*count)(void);
+    void (*label)(int i, char *out, size_t n);
+    void (*click)(int i);
+} escmenu_options;
+void escmenu_set_options(const escmenu_options *o);
+/* for test mode: the options list opened (as a click on its row), and option i clicked */
+void escmenu_test_options(void);
+void escmenu_test_click(int i);
+
 #endif

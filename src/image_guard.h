@@ -39,15 +39,40 @@ static void wa_sha_final(wa_sha256 *s,unsigned char digest[32]){
  wa_sha_block(s,s->block);
  for(i=0;i<32;i++)digest[i]=(unsigned char)(s->h[i/4]>>(24-(i%4)*8));
 }
-static int wa_supported_image(const char *path){
- const unsigned char expected[32]={0xd6,0xc4,0x49,0xc7,0x59,0x16,0xa0,0x94,0x1d,0x11,0x63,0xaf,0xc2,0xa9,0x1f,0x1e,0x72,0xa3,0x16,0x00,0x60,0x9b,0xb9,0xb7,0x66,0xf2,0x30,0x2c,0xa8,0x01,0x64,0xeb};
- unsigned char buffer[16384],digest[32];DWORD n;BOOL ok;LARGE_INTEGER size;wa_sha256 hash;
+static void wa_hex(const unsigned char *d,unsigned n,char *out){static const char x[]="0123456789abcdef";unsigned i;for(i=0;i<n;i++){out[2*i]=x[d[i]>>4];out[2*i+1]=x[d[i]&15];}out[2*n]=0;}
+/* 1: Steam's WA 3.8.1 (the whole file, SHA-256 d6c449c7...); 2: another WA.exe with the same 3.8.1 code and the same
+ * layout (the code section's SHA-256 fbb4fa4b..., and .text / .rdata / .data at the same addresses and sizes): GOG's
+ * edition, a copy of Steam's with its Steam text blanked; 0: not it. why: what was found (for the log). */
+static int wa_supported_image(const char *path,char *why,size_t whyn){
+ static const unsigned char whole[32]={0xd6,0xc4,0x49,0xc7,0x59,0x16,0xa0,0x94,0x1d,0x11,0x63,0xaf,0xc2,0xa9,0x1f,0x1e,0x72,0xa3,0x16,0x00,0x60,0x9b,0xb9,0xb7,0x66,0xf2,0x30,0x2c,0xa8,0x01,0x64,0xeb};
+ static const unsigned char text[32]={0xfb,0xb4,0xfa,0x4b,0x5d,0xaf,0x3b,0xc2,0x57,0xb8,0xf0,0xe0,0x64,0xa5,0x66,0x3a,0xbb,0x36,0xf8,0x74,0x04,0xa4,0x68,0x50,0x82,0x1d,0x79,0x71,0x2e,0x26,0xfa,0xf6};
+ static const struct{const char *name;uint32_t va,vsize;}layout[3]={{".text",0x1000u,0x2184d3u},{".rdata",0x21a000u,0x79477u},{".data",0x294000u,0x230158u}};
+ unsigned char *b=NULL,digest[32];char hx[65];DWORD n=0;LARGE_INTEGER size;wa_sha256 hash;uint32_t pe,opt,nsec,i,k;int result=0;
  HANDLE file=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
- if(file==INVALID_HANDLE_VALUE)return 0;
- if(!GetFileSizeEx(file,&size)||size.QuadPart!=3600384){CloseHandle(file);return 0;}
- wa_sha_init(&hash);
- while((ok=ReadFile(file,buffer,sizeof(buffer),&n,NULL)) && n)wa_sha_update(&hash,buffer,n);
- CloseHandle(file);if(!ok)return 0;wa_sha_final(&hash,digest);
- return memcmp(digest,expected,32)==0;
+ if(why&&whyn)why[0]=0;
+ if(file==INVALID_HANDLE_VALUE){if(why)snprintf(why,whyn,"WA.exe can't be read");return 0;}
+ if(!GetFileSizeEx(file,&size)||size.QuadPart<4096||size.QuadPart>(64<<20)||!(b=(unsigned char*)malloc((size_t)size.QuadPart))||
+    !ReadFile(file,b,(DWORD)size.QuadPart,&n,NULL)||n!=(DWORD)size.QuadPart){CloseHandle(file);free(b);if(why)snprintf(why,whyn,"WA.exe can't be read");return 0;}
+ CloseHandle(file);
+ wa_sha_init(&hash);wa_sha_update(&hash,b,n);wa_sha_final(&hash,digest);
+ if(!memcmp(digest,whole,32)){free(b);if(why)snprintf(why,whyn,"Steam's WA.exe 3.8.1");return 1;}
+ wa_hex(digest,32,hx);
+ if(why)snprintf(why,whyn,"WA.exe of %lu bytes, SHA-256 %s",(unsigned long)n,hx);
+ pe=*(uint32_t*)(b+0x3c);
+ if(pe>n-24-40*3||memcmp(b+pe,"PE\0\0",4)){free(b);return 0;}
+ nsec=*(uint16_t*)(b+pe+6);opt=*(uint16_t*)(b+pe+20);
+ if(nsec<3||pe+24+opt+40*nsec>n){free(b);return 0;}
+ for(k=0;k<3;k++){
+  const unsigned char *s=b+pe+24+opt+40*k;
+  if(strncmp((const char*)s,layout[k].name,8)||*(uint32_t*)(s+12)!=layout[k].va||*(uint32_t*)(s+8)!=layout[k].vsize){
+   if(why){size_t at=strlen(why);snprintf(why+at,whyn-at,"; section %u is not 3.8.1's %s",k,layout[k].name);}free(b);return 0;}
+ }
+ {const unsigned char *s=b+pe+24+opt;uint32_t vs=*(uint32_t*)(s+8),rs=*(uint32_t*)(s+16),rp=*(uint32_t*)(s+20),len=vs<rs?vs:rs;
+  if(rp>n||len>n-rp){free(b);return 0;}
+  wa_sha_init(&hash);wa_sha_update(&hash,b+rp,len);wa_sha_final(&hash,digest);
+  i=memcmp(digest,text,32)==0;wa_hex(digest,32,hx);
+  if(why){size_t at=strlen(why);snprintf(why+at,whyn-at,i?"; its code is 3.8.1's (as Steam's)":"; its code is not 3.8.1's (code SHA-256 %s)",hx);}
+  result=i?2:0;}
+ free(b);return result;
 }
 #endif

@@ -9,7 +9,8 @@ $tests = @(
     @('zoom_math_test', @()),
     @('zoom_badge_test', @()),
     @('raster_test', @((Join-Path $here 'src\raster.c'))),
-    @('colourmap_test', @((Join-Path $here 'src\colourmap.c')))
+    @('colourmap_test', @((Join-Path $here 'src\colourmap.c'))),
+    @('guard_test', @())
 )
 foreach ($t in $tests) {
     $exe = Join-Path $env:TEMP "wkmapzoom_$($t[0]).exe"
