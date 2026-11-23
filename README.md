@@ -18,7 +18,9 @@ Also in the module:
 - **Full-colour maps.** Put a PNG (with transparency for the sky) or a JPEG in `User\SavedLevels` and play it: WA gets
   a 64-colour copy it can load, and you see the map's own colours wherever the land hasn't been blown up.
 - **Resolution in the Esc menu.** WA's Esc menu gets a Resolution list (your monitor's modes) and a Fullscreen /
-  Windowed switch, applied at once without restarting WA.
+  Windowed switch, applied at once without restarting WA. The display is set up again the way WA does it at every
+  game's start (on the same Direct3D device), a size the screen refuses is taken back, and the chat is laid out again
+  for the new width.
 - **Options in the Esc menu.** "Map zoom options" in WA's Esc menu opens the module's options: auto zoom on / off, how
   far it may zoom out and in, the red line, and the zoom number. Click an option to change it; it is saved in
   `wkMapZoom.ini` at once.
@@ -27,6 +29,8 @@ Also in the module:
   earlier turns, and being knocked about in other players' turns, so the line always ends at the worm). It goes as soon
   as you move, or with "stays" it stays all turn. It follows the worm itself, so teleports (and the cursor while you
   aim them) are not drawn.
+- **Speed.** The zoomed map is drawn on all of the PC's cores, with SSE2, and the land's zoomed-out copies are made
+  ahead of time in the background, so changing the zoom doesn't stall.
 - **Auto zoom** (Ctrl + A, the Esc menu, or `AutoZoom=1`): the map zooms on its own to fit the space around your worm.
   Where it opens up it zooms out, already as you head into the open, and where it is tight (a time trial map) it zooms
   in. In an ordinary map it stays at your zoom. It looks at where the walls actually are (thin 1-2 px walls too; blown-up
@@ -80,7 +84,10 @@ Uninstall: delete `wkMapZoom.dll`.
   which everyone watching the game saw happen.
 - True colour needs WA's renderer set to one of its Direct3D 9 options; on the others the map is shown in WA's own 256
   colours (still averaged).
-- Choosing a resolution in the Esc menu saves it as WA's own setting, so the next game starts with it.
+- Choosing a resolution in the Esc menu saves it as WA's own setting, so the next game starts with it. Chat lines
+  written before a change keep the width they had (WA keeps them only as pixels); new ones use the new width. WA picks
+  the chat's font size once, from the size the game starts at.
+- Zoomed far out, the deep water reaches the screen's edges (WA draws it only some way past the level's sides).
 - Don't run it together with another zoom module (wkZoom, wkVista, WormForge's zoom): they all take over WA's map
   drawing (wkMapZoom refuses to start when it finds another one's hooks). Keep one zoom module in the WA folder at a time,
   and one copy of wkMapZoom (renamed copies included).
@@ -137,8 +144,10 @@ Hooks (WA 3.8.1, checked by the SHA-256 of `WA.exe`, or of its code section with
 and the original bytes at each hook point):
 `00533DC0` GameRender, `00542350` RenderDrawingQueue, `0056A700` BlitBitmapClipped, `0056B810` the display's fill,
 `004F6910` BlitSpriteRect, `004F9180` / `004F5E40` pixels, `004F9110` vertical line, `004F5D50` grid fill,
-`00542F10` ClampCameraToBounds, `00542F70` the camera follow, `0059CB30` / `0059CDE0` the Direct3D 9 backends' "show
-frame", `005356D3` / `00540810` the Esc menu, `00557310` a team task's message handler and `004FCDF0` an object's
+`00542F10` ClampCameraToBounds, the camera follow `00542F70` at its two calls (`00554636`, `0055A4B8`), `0059CB30` /
+`0059CDE0` the Direct3D 9 backends' "show frame" (true colour, and a safety net: with no device the frame is skipped,
+not drawn through a NULL device) and `0059C730` their close (the module's own surface let go first), `005356D3` /
+`00540810` the Esc menu, `00528CD0` the game's end (the Esc menu lets go of the game), `00557310` a team task's message handler and `004FCDF0` an object's
 physics step (the movement line: both only look), WA's `CreateFileA` / `CreateFileW` imports (full-colour maps), and a
 `WH_GETMESSAGE` hook on WA's thread for the wheel and numpad. No Direct3D function is hooked (the Steam overlay patches
 those), only WA's own code.
@@ -154,7 +163,9 @@ Needs a 32-bit MinGW gcc (for example `C:\MinGW\bin\gcc.exe`) and PowerShell:
 ```
 
 The tests: the zoom arithmetic, the readout, the drawing (`raster_test`: every kind of drawing call at zooms from 12.5%
-to 800% against a plain draw-then-average reference, and the land's shrunk copies following a blown-up land) and the
+to 800% against a plain draw-then-average reference, the SSE2 rows bit for bit against the plain ones, the land's
+shrunk copies following a blown-up land, and the background builder and the drawing threads sharing the land's tiles)
+and the
 full-colour maps (`colourmap_test`: a PNG and a JPEG opened the way WA opens maps, the copy WA gets taken apart and
 matched back to the original).
 

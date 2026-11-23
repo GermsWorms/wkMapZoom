@@ -4,7 +4,8 @@ param([string]$Gcc = 'C:\MinGW\bin\gcc.exe')
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $mh = Join-Path $here 'third_party\minhook'
-$opt = @('-O2', '-Wall', '-Wextra', '-std=c99', '-msse2', '-mfpmath=sse')
+$opt = @('-O2', '-Wall', '-Wextra', '-std=c99', '-msse2', '-mfpmath=sse', '-fno-math-errno', '-fno-trapping-math')   # (floor / ceil
+                                                                                                                         #  inline; same values)
 $tests = @(
     @('zoom_math_test', @()),
     @('zoom_badge_test', @()),

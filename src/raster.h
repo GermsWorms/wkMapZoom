@@ -31,8 +31,10 @@ typedef struct {
     const uint32_t *full;                   /* ... its full colour per pixel (0x01RRGGBB; 0: none), or NULL */
     uint32_t *mip[RASTER_LEVELS + 1];       /* level L: mw[L] x mh[L], premultiplied 0xAARRGGBB */
     int mw[RASTER_LEVELS + 1], mh[RASTER_LEVELS + 1];
-    uint32_t *stamp;                        /* per tile: the palette generation its copies were made with (0: none) */
+    uint32_t *stamp;                        /* per tile: the palette generation its copies were made with (0: none;
+                                               RASTER_BUSY: a thread is making them) */
 } rland;
+#define RASTER_BUSY 0xffffffffu
 
 enum { ROP_FILL, ROP_BITMAP, ROP_GRID };
 typedef struct {
@@ -46,6 +48,7 @@ typedef struct {
     int mode;                   /* ROP_GRID: 0 copy, 1 skip 0 (with lut: lut[dst << 8 | src]), 2 only over non-0, 3 only */
     const uint8_t *lut;         /*   over 0 (dst: the palette colour nearest what is under it) */
     int land_x, land_y;         /* ROP_BITMAP from a land tile: the land pixel of its source (0, 0); land_x < 0: not */
+    int no_mip;                 /* a land tile whose shrunk copies aren't ready (being made): drawn from the tile itself */
 } rop;
 
 /* an output pixel's taps along one axis: texels k0 .. k0 + n - 1 (region pixels, or a land copy's texels), weights in
@@ -84,7 +87,14 @@ void raster_draw(const rop *op, const rview *v, const rprep *p, int y0, int y1);
 /* the land tile `tile` (its source (0, 0) at land (lx, ly)) compared with the land as last seen -- the rows that are
  * `phase` (0..3) mod 4, all of them when the palette changed -- and the changed strips' shrunk copies made again; a
  * change shows within 4 frames of phases 0, 1, 2, 3. Tiles can be done on different threads. */
-void raster_land_sync(rland *L, const rsrc *tile, int lx, int ly, const uint32_t *pal, uint32_t gen, int phase);
+int raster_land_sync(rland *L, const rsrc *tile, int lx, int ly, const uint32_t *pal, uint32_t gen, int phase, long *budget);
+/* (returns 0 when that tile's copies aren't ready -- another thread is making them, or `budget`, the tiles that may be
+ * made from scratch this frame (shared, counted down; NULL: no limit), is spent: draw it from the tile this frame) */
+/* tile ti's shrunk copies made from `now` if they aren't up to date and no other thread is making them (a background
+ * thread makes them all ahead of time, so zooming out finds them ready); 1 if it made them. `live` (NULL: none) is the
+ * palette generation as it is now, read as it goes: once it isn't `gen`, nothing more is made (a tile made with a newer
+ * palette is never made again with the old one) */
+int raster_land_build(rland *L, const uint32_t *pal, uint32_t gen, int ti, const uint32_t *live);
 /* the land copy an output at zoom z is drawn from (0: the tiles themselves) */
 int raster_level(const rland *L, double z);
 

@@ -50,6 +50,11 @@
  * WKMAPZOOM_TEST_ZOOM=z one zoom all along (no zoom script), WKMAPZOOM_TEST_AUTOZOOM=1 the auto zoom on (its frames saved
  * every 10 s), WKMAPZOOM_TEST_TRACE=1 with it the worm's path (trace.csv) and the land (land-N.pgm) for working the auto
  * zoom out away from WA, WKMAPZOOM_TEST_OPLOG=1 two frames' drawing calls logged (their kinds and sizes on the screen);
+ * WKMAPZOOM_TEST_TOGGLE=1 the Esc menu's display switch at frame 940 and back at 1000, WKMAPZOOM_TEST_GONE=1 30 frames
+ * shown as with no Direct3D device (the safety net's skip) at 1040, WKMAPZOOM_TEST_RECOVER=1 the device made anew as the
+ * recovery does at 1100, WKMAPZOOM_TEST_FULLSCREEN=1 (or WxH) a fullscreen start, WKMAPZOOM_TEST_BADSIZE=WxH a size that
+ * is no monitor mode asked for at 1160 (fullscreen: its rollback), WKMAPZOOM_TEST_CHAT=1 chat lines before and after
+ * the switch with the chat's layout checked (=off: the chat's re-layout off, to see the old way);
  * a movement line's first two showings are saved too.
  * MinHook (third_party/minhook) is BSD licensed. */
 #define WIN32_LEAN_AND_MEAN
@@ -61,6 +66,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <emmintrin.h>
 #include "MinHook.h"
 #include "image_guard.h"
 #include "zoom_math.h"
@@ -146,6 +152,7 @@
 static uintptr_t base;
 static FILE *log_file;
 static int installed, test_mode, test_fullcolour, test_esc;
+static int test_checks;                 /* (test mode, unless WKMAPZOOM_TEST_NOCHECK: the costly self-checks, off for timing) */
 static char dump_dir[MAX_PATH];
 static HINSTANCE self;
 static zoom_cfg cfg = ZOOM_CFG_DEFAULT;
@@ -155,8 +162,11 @@ static zoom_cfg cfg = ZOOM_CFG_DEFAULT;
 static int sw, sh, gw, gh;
 static uint8_t *wbuf;
 static uint32_t *rgb;
+static uint8_t *qcopy;                  /* the palette indices the map went into WA's frame as (the true-colour frame's) */
 #define MAX_HELPERS 15
 static rtap *frame_tx[RASTER_LEVELS + 1], *frame_ty[RASTER_LEVELS + 1];   /* the frame's taps per level (raster.h) */
+static struct { int ok, p0, p1, o, point; double b, z, off; } taps_x[RASTER_LEVELS + 1], taps_y[RASTER_LEVELS + 1];
+                                        /* (what they were made for: kept while the view doesn't change) */
 static uint32_t *lut;                   /* (palette generation << 8) | index, by 18-bit colour */
 static uint32_t lut_gen = 1, pal_gen = 1, pal32[256];
 static uint8_t lut_pal[1024];           /* WA's palette as the tables were made for it */
@@ -164,6 +174,7 @@ static uint32_t ex_key[1024];           /* the palette's own colours (1 << 24 | 
 static uint8_t ex_idx[1024];
 static int filter_smooth = 1, numpad_keys = 1, true_colour = 1, colour_maps = 1, esc_menu = 1, map_theme = 11;
 static int tc_ok;                       /* the true-colour hooks are on */
+static int present_ok;                  /* the show-frame hooks are on (true colour, and the display safety net) */
 static double zoom_now = 1.0, zoom_goal = 1.0, zoom_lo = 1.0, zoom_hi = 1.0;
 static double frame_zoom = 1.0;         /* the zoom this frame is drawn at (fixed at GameRender's start) */
 static double eff_zoom(void);           /* the zoom shown: the wheel's times the auto zoom's share */
@@ -181,6 +192,11 @@ static struct { int on, x1, y1, x2, y2; } tc;   /* this frame's map pixels [x1, 
 static struct { int on, l, t, r, b; } pend;    /* WA's own drawing of an operation into the region buffer, to copy */
 static unsigned n_ops, n_land, n_refused, n_refused_logged;
 static LONGLONG t_sync, t_land, t_ops;      /* this frame's time in the land copies' upkeep, the land, the other calls */
+static LONGLONG t_line;                     /* ... and the movement line */
+static LONGLONG t_compose;                  /* the true-colour frames' composing (in WA's show frame), summed */
+static unsigned n_compose;
+static unsigned trail_drops;                /* (bumped when a line's oldest points are dropped, or all lines cleared: a
+                                               kept line mask is out of date) */
 static LONGLONG qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 
 /* the land */
@@ -235,16 +251,21 @@ static void (__fastcall *original_fill)(void *, int, int, int, int, int, int);
 void *orig_team, *orig_physics, *orig_queue, *orig_clamp, *orig_follow, *orig_bitmap, *orig_grid, *orig_pixel_clipped, *orig_pixel, *orig_vline,
      *orig_grid_fill;                   /* (read by the thunks below) */
 
-static void say(const char *fmt, ...) {
+static void say(const char *fmt, ...) {      /* (one write a line: the background builder says things too) */
     va_list ap;
     SYSTEMTIME t;
+    char line[1024];
+    int n, m;
     if (!log_file) return;
     GetLocalTime(&t);
-    fprintf(log_file, "%02d:%02d:%02d.%03d ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    n = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
     va_start(ap, fmt);
-    vfprintf(log_file, fmt, ap);
+    m = vsnprintf(line + n, sizeof(line) - (size_t)n - 1, fmt, ap);
     va_end(ap);
-    fputc('\n', log_file);
+    if (m < 0) m = 0;
+    if (n + m > (int)sizeof(line) - 2) m = (int)sizeof(line) - 2 - n;
+    line[n + m] = '\n';
+    fwrite(line, 1, (size_t)(n + m + 1), log_file);
     fflush(log_file);
 }
 
@@ -395,9 +416,12 @@ static void advance(void) {
 
 static void free_buffers(void) {
     int k;
-    free(wbuf); free(rgb);
-    wbuf = NULL; rgb = NULL;
-    for (k = 0; k <= RASTER_LEVELS; k++) { free(frame_tx[k]); free(frame_ty[k]); frame_tx[k] = frame_ty[k] = NULL; }
+    free(wbuf); free(rgb); free(qcopy);
+    wbuf = NULL; rgb = NULL; qcopy = NULL;
+    for (k = 0; k <= RASTER_LEVELS; k++) {
+        free(frame_tx[k]); free(frame_ty[k]); frame_tx[k] = frame_ty[k] = NULL;
+        taps_x[k].ok = taps_y[k].ok = 0;
+    }
 }
 
 /* the game resolution seen (a new game, or a resolution change): the buffers and the zoom range for it */
@@ -409,8 +433,9 @@ static int fit_size(int w, int h) {
     free_buffers();
     wbuf = (uint8_t *)malloc((size_t)nw * nh);
     rgb = (uint32_t *)malloc((size_t)w * h * 4);
+    qcopy = (uint8_t *)malloc((size_t)w * h);
     if (!lut) lut = (uint32_t *)calloc(1u << 18, sizeof(uint32_t));
-    ok = wbuf && rgb && lut;
+    ok = wbuf && rgb && qcopy && lut;
     for (k = 0; ok && k <= RASTER_LEVELS; k++) {
         frame_tx[k] = (rtap *)malloc(sizeof(rtap) * (size_t)w);
         frame_ty[k] = (rtap *)malloc(sizeof(rtap) * (size_t)h);
@@ -463,6 +488,7 @@ static void view_load(void *d, const view_state *s) {
 
 /* ---- helper threads ---------------------------------------------------------------------------------------------- */
 static int helpers = -1;
+static volatile LONG lut_fills;         /* (test mode: the colour table's misses -- a 256-colour search each) */
 static HANDLE helper_go[MAX_HELPERS], helper_done[MAX_HELPERS];
 static int helper_y0[MAX_HELPERS], helper_y1[MAX_HELPERS];
 static void (*helper_work)(int, int, int);
@@ -479,9 +505,20 @@ static DWORD WINAPI helper(LPVOID arg) {
 
 static void start_helpers(void) {
     SYSTEM_INFO si;
-    int k, want;
+    DWORD_PTR mine = 0, all = 0;
+    int k, want, cpus = 0;
     GetSystemInfo(&si);
-    want = (int)si.dwNumberOfProcessors - 1;
+    /* the CPUs WA may run on (its affinity mask), not all the machine's: more helpers than that only take turns on them */
+    if (GetProcessAffinityMask(GetCurrentProcess(), &mine, &all) && mine)
+        for (; mine; mine &= mine - 1) cpus++;
+    else
+        cpus = (int)si.dwNumberOfProcessors;
+    want = cpus - 1;
+    {   /* (test mode: WKMAPZOOM_THREADS=n, at most n threads in all -- a smaller PC's) */
+        char v[16];
+        if (test_mode && GetEnvironmentVariableA("WKMAPZOOM_THREADS", v, sizeof(v)) > 0 && atoi(v) >= 1 && atoi(v) - 1 < want)
+            want = atoi(v) - 1;
+    }
     if (want > MAX_HELPERS) want = MAX_HELPERS;
     helpers = 0;
     for (k = 0; k < want; k++) {
@@ -494,14 +531,17 @@ static void start_helpers(void) {
         CloseHandle(t);
         helpers++;
     }
-    say("%d helper threads for the drawing", helpers);
+    say("%d helper threads for the drawing (%d CPUs usable)", helpers, cpus);
 }
 
 /* rows y0..y1 shared out between this thread (worker 0) and the helpers (1..); small jobs stay on this thread */
+static int rows_threads(int y0, int y1, long cost) {   /* (how many threads parallel_rows shares these rows between) */
+    if (helpers < 0) start_helpers();
+    return helpers <= 0 || cost < 32768 || y1 - y0 < 2 * (helpers + 1) ? 1 : helpers + 1;
+}
 static void parallel_rows(void (*work)(int, int, int), int y0, int y1, long cost) {
     int k, band, y;
-    if (helpers < 0) start_helpers();
-    if (helpers <= 0 || cost < 32768 || y1 - y0 < 2 * (helpers + 1)) { work(y0, y1, 0); return; }
+    if (rows_threads(y0, y1, cost) == 1) { work(y0, y1, 0); return; }
     helper_work = work;
     band = (y1 - y0 + helpers) / (helpers + 1);
     y = y0 + band;                          /* the first band is this thread's own */
@@ -543,27 +583,90 @@ static void palette_rgb(void *display) {
     }
     lut_gen = (lut_gen + 1) & 0xffffff;
     if (!lut_gen) { if (lut) memset(lut, 0, sizeof(uint32_t) << 18); lut_gen = 1; }
-    if (++pal_gen == 0) pal_gen = 1;
+    if (++pal_gen == 0 || pal_gen == RASTER_BUSY) pal_gen = 1;
 }
 
 /* the palette colour nearest a colour: its own index when it is one of the palette's, else from the table (filled as
- * colours come up; one aligned word each, so helper threads can share it) */
-static uint8_t nearest(uint32_t c) {
+ * colours come up; one aligned word each, so helper threads can share it). L and gen: the table and its generation
+ * (the callers' loops keep them in registers) */
+static inline uint8_t nearest_in(uint32_t c, uint32_t *L, uint32_t gen) {
     uint32_t h, e, key;
     int idx;
     c &= 0xffffffu;
     for (h = ex_hash(c); (e = ex_key[h]) != 0; h = (h + 1) & 1023)
         if (e == (c | 0x1000000u)) return ex_idx[h];
     key = ((c >> 18) & 63u) << 12 | ((c >> 10) & 63u) << 6 | ((c >> 2) & 63u);
-    e = lut[key];
-    if ((e >> 8) == lut_gen) return (uint8_t)e;
+    e = L[key];
+    if ((e >> 8) == gen) return (uint8_t)e;
+    if (test_mode) InterlockedIncrement(&lut_fills);   /* (test: how many the table misses a frame) */
     idx = pal_nearest(lut_pal, (int)((c >> 16) & 255u), (int)((c >> 8) & 255u), (int)(c & 255u));
-    lut[key] = (lut_gen << 8) | (uint32_t)idx;
+    L[key] = (gen << 8) | (uint32_t)idx;
     return (uint8_t)idx;
 }
+static uint8_t nearest(uint32_t c) { return nearest_in(c, lut, lut_gen); }
 
 /* ---- the land ---------------------------------------------------------------------------------------------------- */
+/* The background builder: the land's shrunk copies made for every tile ahead of time, once a game's land is set up (and
+ * again after a palette change), on a thread of its own at below-normal priority. They used to be made only when a tile
+ * was first drawn zoomed out past 50% -- zooming out brought dozens of new tiles into view at once, and a 4-CPU PC
+ * stalled 18-25 ms a frame making them (a friend's report, 2026-11-22: "stuck when changing the zoom"). A tile is
+ * claimed before it is made (raster.c), so the drawing threads never wait for the builder: a tile it is at is drawn
+ * from the tile itself that frame. land_free stops it (between two tiles) before the land goes. A palette change stops
+ * it too (the tiles are made again with the new palette, from the next start). */
+static HANDLE bg_thread, bg_wake, bg_idle;
+static volatile LONG bg_busy, bg_cancel;
+static uint32_t bg_pal[256], bg_gen, bg_started_gen;
+static DWORD WINAPI bg_builder(LPVOID arg) {
+    (void)arg;
+    for (;;) {
+        LARGE_INTEGER a, b;
+        int ti, made = 0, n, done;
+        WaitForSingleObject(bg_wake, INFINITE);
+        QueryPerformanceCounter(&a);
+        n = land.cols * land.rows;
+        for (ti = 0; ti < n && !bg_cancel && *(volatile uint32_t *)&pal_gen == bg_gen; ti++)
+            made += raster_land_build(&land, bg_pal, bg_gen, ti, &pal_gen);
+        done = ti == n;
+        QueryPerformanceCounter(&b);
+        if (done) say("land copies made ahead for %d of %d tiles in %.0f ms (in the background)", made, n,
+                      (double)(b.QuadPart - a.QuadPart) * 1000.0 / clock_freq.QuadPart);
+        /* (idle signalled before busy is cleared: no start can come between them, so a stop never finds a signal left
+         * over from an earlier run -- the land is never freed under a run) */
+        SetEvent(bg_idle);
+        InterlockedExchange(&bg_busy, 0);
+    }
+    return 0;
+}
+static void bg_stop(void) {                 /* (the builder off the land: before it is freed) */
+    if (!bg_thread || !bg_busy) return;
+    InterlockedExchange(&bg_cancel, 1);
+    SetThreadPriority(bg_thread, GetThreadPriority(GetCurrentThread()));   /* (not kept waiting behind busy threads) */
+    WaitForSingleObject(bg_idle, INFINITE);
+}
+static void bg_start(void) {                /* (once per land and palette generation, from WA's thread between frames) */
+    if (!land_ok || !land.levels || !land.now || bg_busy || bg_started_gen == pal_gen) return;
+    if (!bg_thread) {
+        bg_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+        bg_idle = CreateEventA(NULL, FALSE, FALSE, NULL);
+        if (!bg_wake || !bg_idle || !(bg_thread = CreateThread(NULL, 64 * 1024, bg_builder, NULL, 0, NULL))) {
+            bg_thread = NULL;
+            bg_started_gen = pal_gen;       /* (no builder: copies made when drawn, as before) */
+            return;
+        }
+    }
+    SetThreadPriority(bg_thread, THREAD_PRIORITY_BELOW_NORMAL);
+    memcpy(bg_pal, pal32, sizeof(bg_pal));
+    bg_gen = pal_gen;
+    bg_started_gen = pal_gen;
+    InterlockedExchange(&bg_cancel, 0);
+    ResetEvent(bg_idle);
+    InterlockedExchange(&bg_busy, 1);
+    SetEvent(bg_wake);
+}
+
 static void land_free(void) {
+    bg_stop();
+    bg_started_gen = 0;
     int k;
     free(tiles); free(tile_grid); tile_grid = NULL; free(land.now); free(land.stamp); free(land_snap); free(land_full);
     for (k = 1; k <= RASTER_LEVELS; k++) free(land.mip[k]);
@@ -678,11 +781,23 @@ static void axis_rows(int i0, int i1, int k) {
     (void)k;
     raster_axis(ax.t + (i0 - ax.p0), i0, i1, ax.o, ax.b, rv.z, ax.off, ax.level, ax.level ? 0 : rv.point);
 }
+/* (made again only when what they depend on changed: the zoom, the camera, the view, the offset, the filter) */
 static void frame_taps(int level, double offx, double offy) {
-    ax.t = frame_tx[level]; ax.p0 = rv.x1; ax.o = rv.ox; ax.b = rv.bx; ax.off = offx; ax.level = level;
-    parallel_rows(axis_rows, rv.x1, rv.x2, (long)(rv.x2 - rv.x1) * 64);
-    ax.t = frame_ty[level]; ax.p0 = rv.y1; ax.o = rv.oy; ax.b = rv.by; ax.off = offy;
-    parallel_rows(axis_rows, rv.y1, rv.y2, (long)(rv.y2 - rv.y1) * 64);
+    const int point = level ? 0 : rv.point;
+    if (!(taps_x[level].ok && taps_x[level].p0 == rv.x1 && taps_x[level].p1 == rv.x2 && taps_x[level].o == rv.ox &&
+          taps_x[level].b == rv.bx && taps_x[level].z == rv.z && taps_x[level].off == offx && taps_x[level].point == point)) {
+        ax.t = frame_tx[level]; ax.p0 = rv.x1; ax.o = rv.ox; ax.b = rv.bx; ax.off = offx; ax.level = level;
+        parallel_rows(axis_rows, rv.x1, rv.x2, (long)(rv.x2 - rv.x1) * 64);
+        taps_x[level].ok = 1; taps_x[level].p0 = rv.x1; taps_x[level].p1 = rv.x2; taps_x[level].o = rv.ox;
+        taps_x[level].b = rv.bx; taps_x[level].z = rv.z; taps_x[level].off = offx; taps_x[level].point = point;
+    }
+    if (!(taps_y[level].ok && taps_y[level].p0 == rv.y1 && taps_y[level].p1 == rv.y2 && taps_y[level].o == rv.oy &&
+          taps_y[level].b == rv.by && taps_y[level].z == rv.z && taps_y[level].off == offy && taps_y[level].point == point)) {
+        ax.t = frame_ty[level]; ax.p0 = rv.y1; ax.o = rv.oy; ax.b = rv.by; ax.off = offy; ax.level = level;
+        parallel_rows(axis_rows, rv.y1, rv.y2, (long)(rv.y2 - rv.y1) * 64);
+        taps_y[level].ok = 1; taps_y[level].p0 = rv.y1; taps_y[level].p1 = rv.y2; taps_y[level].o = rv.oy;
+        taps_y[level].b = rv.by; taps_y[level].z = rv.z; taps_y[level].off = offy; taps_y[level].point = point;
+    }
     rv.gx[level] = frame_tx[level]; rv.gy[level] = frame_ty[level];
     rv.gox[level] = offx; rv.goy[level] = offy;
 }
@@ -716,10 +831,15 @@ static int op_out_rows(const rop *op, int *a, int *b) {
     return *a < *b;
 }
 
+/* (a tile whose copies aren't ready -- the background builder is at it, or this frame's budget of tiles made from scratch,
+ * one per drawing thread, is spent -- is drawn from itself this frame) */
+static long sync_budget;
 static void sync_rows(int i0, int i1, int k) {
     int i;
     (void)k;
-    for (i = i0; i < i1; i++) raster_land_sync(&land, &batch[i].src, batch[i].land_x, batch[i].land_y, pal32, pal_gen, (int)(frames & 3));
+    for (i = i0; i < i1; i++)
+        batch[i].no_mip = !raster_land_sync(&land, &batch[i].src, batch[i].land_x, batch[i].land_y, pal32, pal_gen, (int)(frames & 3),
+                                            &sync_budget);
 }
 
 static void land_rows(int y0, int y1, int k) {
@@ -745,6 +865,7 @@ static void batch_flush(void) {
     level = rv.point ? 0 : raster_level(&land, rv.z);
     if (level > 0) {
         const double offx = (double)batch[0].col0 + batch[0].land_x, offy = (double)batch[0].row0 + batch[0].land_y;
+        sync_budget = rows_threads(0, nbatch, (long)nbatch * 8192);   /* (one tile a thread) */
         parallel_rows(sync_rows, 0, nbatch, (long)nbatch * 8192);
         if (!rv.gx[level] || rv.gox[level] != offx || rv.goy[level] != offy) frame_taps(level, offx, offy);
     }
@@ -848,6 +969,23 @@ int __cdecl h_bitmap(uint32_t *r) {
     return 1;
 }
 
+/* Zoomed far out, WA's deep water (and the sky above its gradient) are fills that reach some way past the level's sides
+ * but not to the view's: the corners below the water line stayed black (a friend's screenshot, 2026-11-22; 66 px short
+ * of each side at 25% on a 1920 px level here). A fill as wide as the level or wider is drawn across the whole view.
+ * (Only fills: the land and everything else stay as WA puts them.) */
+static int wide_l = 1, wide_r = 0;      /* the level's columns in region coordinates this frame (none: wide_l > wide_r) */
+static void widen_fill(int *l, int *r, int t, int b, int32_t *c) {
+    if (wide_l >= wide_r || *l > wide_l || *r < wide_r || b - t < 2 || (*l <= 0 && *r >= rw_now)) return;
+    if (test_mode) {
+        static int told;
+        if (told++ < 4) say("test: fill %d..%d x %d..%d (the level %d..%d) drawn across the view (0..%d)", *l, *r, t, b, wide_l,
+                            wide_r, rw_now);
+    }
+    *l = 0; *r = rw_now;
+    if (c[0] > 0) c[0] = 0;
+    if (c[2] < rw_now) c[2] = rw_now;
+}
+
 /* the display's rectangle fill (from its origin, inside its clip) */
 static void __fastcall hook_fill(void *d, int edx, int x1, int y1, int x2, int y2, int colour) {
     int32_t c[4];
@@ -860,7 +998,9 @@ static void __fastcall hook_fill(void *d, int edx, int x1, int y1, int x2, int y
     memset(&op, 0, sizeof(op));
     op.kind = ROP_FILL; op.index = (uint8_t)colour; op.land_x = -1;
     clip_of(d, D_CLIP, c);
-    if (clip_area(&op, x1 + ox, y1 + oy, x2 + ox, y2 + oy, c)) draw_op(&op);
+    x1 += ox; x2 += ox; y1 += oy; y2 += oy;
+    widen_fill(&x1, &x2, y1, y2, c);
+    if (clip_area(&op, x1, y1, x2, y2, c)) draw_op(&op);
 }
 
 /* BitGrid::BlitSpriteRect into the frame: the variants wkVista draws (raster.rs `check`); the rest WA's own */
@@ -912,6 +1052,7 @@ static int grid_rect(uint32_t *r, int l, int t, int rr, int b, int colour, int c
     memset(&op, 0, sizeof(op));
     op.kind = ROP_FILL; op.index = (uint8_t)colour; op.land_x = -1;
     if (clipped) clip_of(g, GR_CLIP, c);
+    if (clipped) widen_fill(&l, &rr, t, b, c);
     if (clip_area(&op, l, t, rr, b, clipped ? c : NULL)) draw_op(&op);
     return 1;
 }
@@ -937,18 +1078,30 @@ static void sent_rows(int y0, int y1, int k) {
     (void)k;
     for (y = y0; y < y1; y++) memset(wbuf + (size_t)y * gw, SENT, (size_t)rw_now);
 }
+/* the map into WA's frame as its nearest palette colours -- and a copy of them (qcopy) for the true-colour frame to
+ * compare against (it looked each pixel's colour up again: a second pass as long as this one, 2026-11-22). A pixel of
+ * the same colour as the one before takes its index. */
 static void quant_rows(int y0, int y1, int k) {
+    uint32_t *const L = lut;
+    const uint32_t gen = lut_gen;
     int y, x;
     (void)k;
     for (y = y0; y < y1; y++) {
         const uint32_t *s = rgb + (size_t)y * sw;
-        uint8_t *d = q_frame + (size_t)y * q_stride;
-        for (x = tc.x1; x < tc.x2; x++) d[x] = nearest(s[x]);
+        uint8_t *d = q_frame + (size_t)y * q_stride, *q = qcopy + (size_t)y * sw;
+        uint32_t pc = 0xffffffffu;
+        uint8_t pi = 0;
+        for (x = tc.x1; x < tc.x2; x++) {
+            const uint32_t c = s[x] & 0xffffffu;
+            if (c != pc) { pc = c; pi = nearest_in(c, L, gen); }
+            d[x] = pi;
+            q[x] = pi;
+        }
     }
 }
 
-/* the frame to show: each pixel the map's own colour where WA's frame still holds the map (its nearest palette colour),
- * else (the HUD, the readout) the palette's */
+/* the frame to show: each pixel the map's own colour where WA's frame still holds what the map put there (qcopy), else
+ * (the HUD, the readout) the palette's; 16 pixels at a time where all 16 are the map's */
 static struct { uint8_t *bits; int pitch; const uint8_t *frame; int fstride, w; } cj;
 static void compose_rows(int y0, int y1, int k) {
     int y, x;
@@ -957,9 +1110,20 @@ static void compose_rows(int y0, int y1, int k) {
         uint32_t *d = (uint32_t *)(cj.bits + (size_t)y * cj.pitch);
         const uint8_t *f = cj.frame + (size_t)y * cj.fstride;
         const uint32_t *s = rgb + (size_t)y * sw;
+        const uint8_t *q = qcopy + (size_t)y * sw;
         if (y >= tc.y1 && y < tc.y2) {
             for (x = 0; x < tc.x1; x++) d[x] = pal32[f[x]];
-            for (x = tc.x1; x < tc.x2; x++) d[x] = f[x] == nearest(s[x]) ? s[x] : pal32[f[x]];
+            x = tc.x1;
+            while (x < tc.x2) {
+                if (x + 16 <= tc.x2 &&
+                    _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i *)(f + x)), _mm_loadu_si128((const __m128i *)(q + x)))) == 0xffff) {
+                    memcpy(d + x, s + x, 16 * sizeof(uint32_t));
+                    x += 16;
+                    continue;
+                }
+                d[x] = f[x] == q[x] ? s[x] : pal32[f[x]];
+                x++;
+            }
             for (x = tc.x2; x < cj.w; x++) d[x] = pal32[f[x]];
         } else {
             for (x = 0; x < cj.w; x++) d[x] = pal32[f[x]];
@@ -969,9 +1133,13 @@ static void compose_rows(int y0, int y1, int k) {
 static int compose(uint8_t *bits, int pitch, int w, int h) {
     const uint8_t *frame = *(const uint8_t **)VA(FRAME_PTR_VA);
     int fw = *(int32_t *)VA(FRAME_W_VA), fh = *(int32_t *)VA(FRAME_H_VA);
-    if (!frame || !rgb || !tc.on || w != sw || h != sh || fw < w || fh < h) return 0;
+    LONGLONG t0;
+    if (!frame || !rgb || !qcopy || !tc.on || w != sw || h != sh || fw < w || fh < h) return 0;
+    t0 = qpc();
     cj.bits = bits; cj.pitch = pitch; cj.frame = frame; cj.fstride = fw; cj.w = w;
     parallel_rows(compose_rows, 0, h, (long)w * h);
+    t_compose += qpc() - t0;
+    n_compose++;
     return 1;
 }
 
@@ -1046,11 +1214,13 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
     frame_taps(0, 0.0, 0.0);
     tc.on = 0; tc.x1 = cx1; tc.y1 = cy1; tc.x2 = cx2; tc.y2 = cy2;
     clear_colour = pal32[0];
+    if (camera && land_ok && land.w > 0) { wide_l = bx - (((const int32_t *)camera)[0] >> 16); wide_r = wide_l + land.w; }
+    else { wide_l = 1; wide_r = 0; }        /* (WA's camera transform: region = world - camera + bx, whole pixels) */
     parallel_rows(clear_rows, cy1, cy2, (long)(cx2 - cx1) * (cy2 - cy1));
     check = test_mode && checks < 3 && frames > 150;   /* (test mode: the region buffer watched for WA's own drawing) */
     if (check) parallel_rows(sent_rows, 0, rh, (long)rw * rh);
     n_ops = n_land = n_refused = 0;
-    t_sync = t_land = t_ops = 0;
+    t_sync = t_land = t_ops = t_line = 0;
     pend.on = 0; nbatch = 0;
     view_load(display, &world);
     world_mode = 1;
@@ -1074,27 +1244,48 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
     parallel_rows(quant_rows, cy1, cy2, (long)(cx2 - cx1) * (cy2 - cy1));
     tc.on = 1;
     QueryPerformanceCounter(&t1b);
+    if (test_checks && frames % 300 == 200) {   /* (test: the indices kept for the true-colour frame against a fresh look) */
+        long diff = 0;
+        int y, x;
+        for (y = cy1; y < cy2; y++)
+            for (x = cx1; x < cx2; x++) diff += qcopy[(size_t)y * sw + x] != nearest(rgb[(size_t)y * sw + x]);
+        say("test: the kept palette indices against a fresh look: %ld pixels differ (a few can: two threads filling one "
+            "table entry at once, each with its own colour)", diff);
+    }
     for (i = (int)n - 1; i >= 0; i--)       /* the HUD, back to front */
         if (is_screen(queue_list[i])) { last = draw_entry(queue, display, camera, queue_list[i]); nscreen++; }
     *(uint32_t *)(queue + Q_COUNT) = n;
     memcpy(entries, queue_list, n * 4);
     QueryPerformanceCounter(&t2);
+    if (test_mode) {                        /* (test: frames with many colour table misses, or slow -- zooming) */
+        const double f = 1000.0 / clock_freq.QuadPart, map = (double)(t1.QuadPart - t0.QuadPart) * f, q = (double)(t1b.QuadPart - t1.QuadPart) * f;
+        const LONG fills = InterlockedExchange(&lut_fills, 0);
+        static unsigned told;
+        if ((fills > 2000 || map + q > 12.0) && told < 400) {
+            told++;
+            say("test: frame %u at %.1f%%: %ld colour table fills; map %.2f ms (upkeep %.2f, land %.2f, other %.2f, line %.2f), "
+                "into WA's frame %.2f ms", frames, z * 100.0, (long)fills, map, t_sync * f, t_land * f, t_ops * f, t_line * f, q);
+        }
+    }
     {   /* the cost, for the log: the map, its colours into WA's frame, the HUD */
-        static double map_ms, scale_ms, rest_ms, zsum, sync_ms, land_ms, ops_ms;
+        static double map_ms, scale_ms, rest_ms, zsum, sync_ms, land_ms, ops_ms, line_ms;
         static unsigned count, ops, lands;
         const double f = 1000.0 / clock_freq.QuadPart;
-        sync_ms += t_sync * f; land_ms += t_land * f; ops_ms += t_ops * f;
+        sync_ms += t_sync * f; land_ms += t_land * f; ops_ms += t_ops * f; line_ms += t_line * f;
         map_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / clock_freq.QuadPart;
         scale_ms += (double)(t1b.QuadPart - t1.QuadPart) * 1000.0 / clock_freq.QuadPart;
         rest_ms += (double)(t2.QuadPart - t1b.QuadPart) * 1000.0 / clock_freq.QuadPart;
         zsum += z; ops += n_ops; lands += n_land;
         if (++count == 120) {
+            const double comp_ms = n_compose ? (double)t_compose * f / n_compose : 0.0;
             say("120 drawn frames (zoom %.0f%% on average): map %.2f ms (land copies' upkeep %.2f, land %.2f for %u tiles, "
-                "%u other drawing calls %.2f, WA's own %.2f), into WA's frame %.2f ms, HUD %.2f ms a frame; %u frames "
-                "shown in true colour so far", zsum / count * 100.0, map_ms / count, sync_ms / count, land_ms / count,
-                lands / count, ops / count, ops_ms / count, (map_ms - sync_ms - land_ms - ops_ms) / count, scale_ms / count,
-                rest_ms / count, present_shown());
-            map_ms = scale_ms = rest_ms = zsum = sync_ms = land_ms = ops_ms = 0; count = ops = lands = 0;
+                "%u other drawing calls %.2f, movement line %.2f, WA's own %.2f), into WA's frame %.2f ms, HUD %.2f ms, "
+                "true-colour frame %.2f ms a frame; %u frames shown in true colour so far", zsum / count * 100.0,
+                map_ms / count, sync_ms / count, land_ms / count, lands / count, ops / count, ops_ms / count,
+                line_ms / count, (map_ms - sync_ms - land_ms - ops_ms - line_ms) / count, scale_ms / count, rest_ms / count,
+                comp_ms, present_shown());
+            map_ms = scale_ms = rest_ms = zsum = sync_ms = land_ms = ops_ms = line_ms = 0; count = ops = lands = 0;
+            t_compose = 0; n_compose = 0;
         }
     }
     if (!logged_split) {
@@ -1178,6 +1369,7 @@ static void trail_reset(void) {
     trail_turn = 0;
     trail_multi = 0;
     if (trails) for (k = 0; k < TRAIL_TEAMS * TRAIL_PER_TEAM; k++) trails[k].n = 0;
+    trail_drops++;                          /* (a kept line mask is out of date) */
 }
 
 /* a team's current worm and where it is (px); 0 when it isn't known */
@@ -1213,6 +1405,7 @@ static void trail_add(team_trail *t, double x, double y, int own) {
         memmove(t->pt, t->pt + TRAIL_MAX / 4, sizeof(tpoint) * (TRAIL_MAX - TRAIL_MAX / 4));
         t->n -= TRAIL_MAX / 4;
         t->pt[0].brk = 1;
+        trail_drops++;                      /* (a kept line mask is out of date) */
         e = &t->pt[t->n - 1];
     }
     p = &t->pt[t->n++];
@@ -1342,28 +1535,51 @@ static void trail_frame(void *world) {
 }
 
 /* The line is drawn into a coverage mask first (each pixel the most any segment covers it, times that segment's
- * opacity), then blended onto the map once: where short segments overlap, the line keeps its look. */
+ * opacity), then blended onto the map: where short segments overlap, the line keeps its look.
+ *
+ * The mask is kept from frame to frame and drawn again only when something it depends on changed (the camera, the zoom,
+ * the view, which worm's line and which turn is bright, the points of earlier turns -- see trail_key), so a still
+ * camera blends a ready mask (it was drawn afresh every frame: ~3 ms a frame at 100% and 17 ms with a long line on the
+ * owner's PC, 2026-11-22). A redraw and the blend are shared out by rows between the helper threads; each row keeps
+ * the span its segments' boxes cover, so the blend and the next redraw's clear touch only those. Pixel for pixel the
+ * same as drawing it afresh (the per-pixel formula is the same, and the max over segments doesn't depend on their order). */
+typedef struct { double x0, y0, x1, y1, a; } tseg;
 static uint8_t *trail_mask;
-static int trail_mask_n, mx1, my1, mx2, my2;
+static int16_t *trail_lo, *trail_hi;        /* per row: the mask's span [lo, hi) (lo >= hi: none) */
+static int trail_mask_n, trail_rows;
+static tseg *tsegs;
+static int n_tsegs, cap_tsegs;
+static double trail_half;
+static uint8_t *trail_target;               /* (the mask the segments go into: the kept one, or a test check's) */
+static struct {
+    int valid, show, hl, turn, all, nhist, next_brk, x1, y1, x2, y2, w, h;
+    int32_t cx, cy;
+    double z, ox, oy;
+    unsigned drops;
+} trail_key;
 
-/* one segment into the mask: anti-aliased, `half` pixels each side, opacity a */
-static void trail_segment(double x0, double y0, double x1, double y1, double half, double a) {
-    const double dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy, reach = half + 0.5, reach2 = reach * reach;
+/* one segment's rows [y0, y1) into the target mask (and the rows' spans): anti-aliased, `half` pixels each side,
+ * opacity a */
+static void trail_segment_rows(const tseg *s, double half, int y0, int y1) {
+    const double x0 = s->x0, x1 = s->x1, dx = s->x1 - s->x0, dy = s->y1 - s->y0, len2 = dx * dx + dy * dy;
+    const double reach = half + 0.5, reach2 = reach * reach, a = s->a;
     int X, Y, xa = (int)floor((x0 < x1 ? x0 : x1) - half - 1), xb = (int)ceil((x0 > x1 ? x0 : x1) + half + 1);
-    int ya = (int)floor((y0 < y1 ? y0 : y1) - half - 1), yb = (int)ceil((y0 > y1 ? y0 : y1) + half + 1);
+    int ya = (int)floor((s->y0 < s->y1 ? s->y0 : s->y1) - half - 1), yb = (int)ceil((s->y0 > s->y1 ? s->y0 : s->y1) + half + 1);
     if (xa < rv.x1) xa = rv.x1;
     if (ya < rv.y1) ya = rv.y1;
     if (xb > rv.x2) xb = rv.x2;
     if (yb > rv.y2) yb = rv.y2;
+    if (ya < y0) ya = y0;
+    if (yb > y1) yb = y1;
     if (xa >= xb || ya >= yb) return;
-    if (xa < mx1) mx1 = xa;
-    if (ya < my1) my1 = ya;
-    if (xb > mx2) mx2 = xb;
-    if (yb > my2) my2 = yb;
     for (Y = ya; Y < yb; Y++) {
-        uint8_t *row = trail_mask + (size_t)Y * sw;
+        uint8_t *row = trail_target + (size_t)Y * sw;
+        if (trail_target == trail_mask) {
+            if (xa < trail_lo[Y]) trail_lo[Y] = (int16_t)xa;
+            if (xb > trail_hi[Y]) trail_hi[Y] = (int16_t)xb;
+        }
         for (X = xa; X < xb; X++) {
-            const double px = X + 0.5 - x0, py = Y + 0.5 - y0;
+            const double px = X + 0.5 - x0, py = Y + 0.5 - s->y0;
             double t = len2 > 0.0 ? (px * dx + py * dy) / len2 : 0.0, ex, ey, d2, cov;
             uint8_t v;
             if (t < 0.0) t = 0.0;
@@ -1379,23 +1595,42 @@ static void trail_segment(double x0, double y0, double x1, double y1, double hal
     }
 }
 
-/* the shown line onto the frame's map picture (WA's camera transform: screen = world - camera, whole pixels); points
- * closer than 3 screen pixels to the last one drawn are passed over */
-static void trail_draw(const int32_t *camera) {
-    const team_trail *tr;
-    const double cx = (double)(camera[0] >> 16), cy = (double)(camera[1] >> 16);
-    double half = sh / 540.0, lx = 0.0, ly = 0.0;
-    int i, first = -1, n_hl = 0, k = 0, have = 0, X, Y;
-    if (!trail_visible || trail_show < 0 || !trail_hl || !trails) return;
-    if (trail_mask_n != sw * sh) {
-        free(trail_mask);
-        trail_mask = (uint8_t *)calloc((size_t)sw * sh, 1);
-        trail_mask_n = trail_mask ? sw * sh : 0;
-        if (!trail_mask) return;
+/* (workers) the kept mask's rows cleared within their spans; every segment's part in rows [y0, y1); the mask onto the
+ * map */
+static void trail_clear_rows(int y0, int y1, int k) {
+    int Y;
+    (void)k;
+    for (Y = y0; Y < y1; Y++) {
+        if (trail_lo[Y] < trail_hi[Y]) memset(trail_mask + (size_t)Y * sw + trail_lo[Y], 0, (size_t)(trail_hi[Y] - trail_lo[Y]));
+        trail_lo[Y] = INT16_MAX; trail_hi[Y] = 0;
     }
-    tr = &trails[trail_show];
-    if (half < 1.25) half = 1.25;
-    mx1 = rv.x2; my1 = rv.y2; mx2 = rv.x1; my2 = rv.y1;
+}
+static void trail_draw_rows(int y0, int y1, int k) {
+    int i;
+    (void)k;
+    for (i = 0; i < n_tsegs; i++) trail_segment_rows(&tsegs[i], trail_half, y0, y1);
+}
+static void trail_blend_rows(int y0, int y1, int k) {
+    int X, Y;
+    (void)k;
+    for (Y = y0; Y < y1; Y++) {
+        const uint8_t *m = trail_mask + (size_t)Y * sw;
+        uint32_t *row = rgb + (size_t)Y * sw;
+        for (X = trail_lo[Y]; X < trail_hi[Y]; X++) {
+            const uint32_t w = m[X], o = row[X];
+            if (!w) continue;
+            row[X] = ((((o >> 16) & 255u) * (255u - w) + 235u * w) / 255u) << 16 | ((((o >> 8) & 255u) * (255u - w) + 30u * w) / 255u) << 8 |
+                     (((o & 255u) * (255u - w) + 30u * w) / 255u);
+        }
+    }
+}
+
+/* the segments of the shown line, in screen pixels (WA's camera transform: screen = world - camera, whole pixels);
+ * points closer than 3 screen pixels to the last one drawn are passed over. 0: not all of them (no memory) */
+static int trail_segments(const team_trail *tr, double cx, double cy) {
+    double lx = 0.0, ly = 0.0;
+    int i, first = -1, n_hl = 0, k = 0, have = 0;
+    n_tsegs = 0;
     for (i = 0; i < tr->n; i++) if (tr->pt[i].own && tr->pt[i].turn == trail_hl) { if (first < 0) first = i; n_hl++; }
     for (i = 0; i < tr->n; i++) {
         const tpoint *b = &tr->pt[i];
@@ -1407,20 +1642,85 @@ static void trail_draw(const int32_t *camera) {
         else alpha = 0.35;
         if (!have || b->brk) { lx = bx; ly = by; have = 1; continue; }
         if (fabs(bx - lx) < 3.0 && fabs(by - ly) < 3.0 && i + 1 < tr->n && !tr->pt[i + 1].brk) continue;
-        trail_segment(lx, ly, bx, by, half, alpha);
+        if (n_tsegs == cap_tsegs) {
+            const int cap = cap_tsegs ? cap_tsegs * 2 : 1024;
+            tseg *ns = (tseg *)realloc(tsegs, sizeof(tseg) * (size_t)cap);
+            if (!ns) return 0;
+            tsegs = ns; cap_tsegs = cap;
+        }
+        tsegs[n_tsegs].x0 = lx; tsegs[n_tsegs].y0 = ly; tsegs[n_tsegs].x1 = bx; tsegs[n_tsegs].y1 = by; tsegs[n_tsegs].a = alpha;
+        n_tsegs++;
         lx = bx; ly = by;
     }
-    for (Y = my1; Y < my2; Y++) {               /* the mask onto the map, and cleared */
-        uint8_t *m = trail_mask + (size_t)Y * sw;
-        uint32_t *row = rgb + (size_t)Y * sw;
-        for (X = mx1; X < mx2; X++) {
-            const uint32_t w = m[X], o = row[X];
-            if (!w) continue;
-            m[X] = 0;
-            row[X] = ((((o >> 16) & 255u) * (255u - w) + 235u * w) / 255u) << 16 | ((((o >> 8) & 255u) * (255u - w) + 30u * w) / 255u) << 8 |
-                     (((o & 255u) * (255u - w) + 30u * w) / 255u);
+    return 1;
+}
+
+static void trail_draw(const int32_t *camera) {
+    const team_trail *tr;
+    const int32_t cx = camera[0] >> 16, cy = camera[1] >> 16;
+    LONGLONG t0;
+    int nhist, next_brk, hit;
+    if (!trail_visible || trail_show < 0 || !trail_hl || !trails) return;
+    t0 = qpc();
+    if (trail_mask_n != sw * sh || trail_rows != sh) {
+        int Y;
+        free(trail_mask); free(trail_lo); free(trail_hi);
+        trail_mask = (uint8_t *)calloc((size_t)sw * sh, 1);
+        trail_lo = (int16_t *)malloc(sizeof(int16_t) * (size_t)sh);
+        trail_hi = (int16_t *)malloc(sizeof(int16_t) * (size_t)sh);
+        trail_key.valid = 0;
+        if (!trail_mask || !trail_lo || !trail_hi) { free(trail_mask); free(trail_lo); free(trail_hi); trail_mask = NULL; trail_lo = trail_hi = NULL; trail_mask_n = trail_rows = 0; return; }
+        trail_mask_n = sw * sh; trail_rows = sh;
+        for (Y = 0; Y < sh; Y++) { trail_lo[Y] = INT16_MAX; trail_hi[Y] = 0; }
+    }
+    tr = &trails[trail_show];
+    trail_half = sh / 540.0;
+    if (trail_half < 1.25) trail_half = 1.25;
+    /* what the drawn line depends on: its earlier turns' points (they come first: points go in in time order), and the
+     * first of this turn's (the 3-pixel test looks one point ahead) */
+    for (nhist = tr->n; nhist > 0 && tr->pt[nhist - 1].turn >= trail_turn; nhist--) {}
+    next_brk = nhist < tr->n ? 1 + tr->pt[nhist].brk : 0;
+    hit = trail_key.valid && trail_key.show == trail_show && trail_key.hl == trail_hl && trail_key.turn == trail_turn &&
+          trail_key.all == trail_all && trail_key.nhist == nhist && trail_key.next_brk == next_brk && trail_key.cx == cx &&
+          trail_key.cy == cy && trail_key.z == rv.z && trail_key.ox == rv.ox && trail_key.oy == rv.oy && trail_key.x1 == rv.x1 &&
+          trail_key.y1 == rv.y1 && trail_key.x2 == rv.x2 && trail_key.y2 == rv.y2 && trail_key.w == sw && trail_key.h == sh &&
+          trail_key.drops == trail_drops;
+    if (!hit) {                             /* drawn afresh: the old mask cleared, the segments gathered, then drawn */
+        long cost;
+        int whole;
+        trail_key.valid = 0;
+        parallel_rows(trail_clear_rows, 0, sh, (long)sw * sh / 8);
+        whole = trail_segments(tr, (double)cx, (double)cy);
+        trail_target = trail_mask;
+        cost = (long)n_tsegs * (long)(trail_half * 2 + 4) * 64;
+        parallel_rows(trail_draw_rows, rv.y1, rv.y2, cost);
+        trail_key.valid = whole;            /* (part of the line only, out of memory: drawn again next frame) */
+        trail_key.show = trail_show; trail_key.hl = trail_hl; trail_key.turn = trail_turn;
+        trail_key.all = trail_all; trail_key.nhist = nhist; trail_key.next_brk = next_brk; trail_key.cx = cx; trail_key.cy = cy;
+        trail_key.z = rv.z; trail_key.ox = rv.ox; trail_key.oy = rv.oy; trail_key.x1 = rv.x1; trail_key.y1 = rv.y1;
+        trail_key.x2 = rv.x2; trail_key.y2 = rv.y2; trail_key.w = sw; trail_key.h = sh; trail_key.drops = trail_drops;
+    } else if (test_checks && frames % 30 == 0) {   /* (test: a kept mask against one drawn afresh) */
+        uint8_t *fresh = (uint8_t *)calloc((size_t)sw * sh, 1);
+        if (fresh) {
+            long diff = 0, outside = 0;
+            int Y, X;
+            trail_segments(tr, (double)cx, (double)cy);
+            trail_target = fresh;
+            trail_draw_rows(rv.y1, rv.y2, 0);
+            trail_target = trail_mask;
+            for (Y = 0; Y < sh; Y++)
+                for (X = 0; X < sw; X++) {
+                    const uint8_t m = trail_mask[(size_t)Y * sw + X];
+                    diff += fresh[(size_t)Y * sw + X] != m;
+                    outside += m && (X < trail_lo[Y] || X >= trail_hi[Y]);   /* (pixels the blend would miss) */
+                }
+            say("test: the kept line mask against a fresh one: %ld pixels differ, %ld outside their rows' spans (%d segments)",
+                diff, outside, n_tsegs);
+            free(fresh);
         }
     }
+    parallel_rows(trail_blend_rows, rv.y1, rv.y2, (long)(rv.x2 - rv.x1) * (rv.y2 - rv.y1) / 4);
+    t_line += qpc() - t0;
 }
 
 /* ---- the auto zoom ------------------------------------------------------------------------------------------- */
@@ -1786,6 +2086,8 @@ static void dump_frame(void *display, const char *name) {
 
 /* 100% for a moment, out to the farthest, in to the closest, back to 100%; WA's frame saved in each */
 static int test_switch_w, test_switch_h;
+static int test_fullscreen, test_toggle, test_gone, test_recover, test_bad_w, test_bad_h;
+static int test_chat;                   /* WKMAPZOOM_TEST_CHAT=1: chat lines before and after the switch, frames saved (=off: the fix off) */
 static double test_zoom;                /* WKMAPZOOM_TEST_ZOOM: one zoom all along, no zoom script */
 static void test_script(void *display) {
     static int shown_at = -1, trail_dumps;
@@ -1814,10 +2116,25 @@ static void test_script(void *display) {
     case 460: dump_frame(display, "4-zoomin-readout"); break;
     case 590: dump_frame(display, "5-zoomin"); set_goal(1.0, "test script"); break;
     case 660: dump_frame(display, "6-zoom100-readout"); break;
+    case 640:
+        if (test_chat && esc_menu) {
+            escmenu_test_chat("test: where does the chat start? 0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 the end", 1);
+            escmenu_test_chat("test: a second line", 0);
+        }
+        break;
     case 670: if (test_switch_w) set_goal(0.5, "test script: zoomed for the switch"); break;   /* (the switch zoomed: the
                                                                                              owner's crash, 2026-11-22) */
-    case 700: if (test_switch_w) escmenu_ask(test_switch_w, test_switch_h); break;
+    case 690: if (test_chat && esc_menu) { escmenu_test_chat_check("before the switch"); dump_frame(display, "13a-chat-before"); } break;
+    case 700: if (test_switch_w && esc_menu) escmenu_ask(test_switch_w, test_switch_h); break;
     case 703: if (test_switch_w) dump_frame(display, "8a-just-switched"); break;
+    case 712:
+        if (test_chat && esc_menu) {
+            escmenu_test_chat_check("after the switch");
+            dump_frame(display, "13b-chat-after");
+            escmenu_test_chat("test: a line after the switch, wrapped to the new width: 0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789", 0);
+        }
+        break;
+    case 730: if (test_chat) dump_frame(display, "13c-chat-new-line"); break;
     case 720: if (test_esc) escmenu_test_open(); break;
     case 760:
         if (test_switch_w) set_goal(0.5, "test script");
@@ -1833,6 +2150,16 @@ static void test_script(void *display) {
         if (wnd) PostMessageA(wnd, WM_KEYDOWN, frames == 905 ? VK_ADD : VK_SUBTRACT, 1);
         break;
     }
+    case 940: if (test_toggle && esc_menu) escmenu_ask(0, 0); break;                    /* windowed <-> fullscreen */
+    case 943: if (test_toggle) dump_frame(display, "12a-toggled"); break;
+    case 1000: if (test_toggle && esc_menu) escmenu_ask(0, 0); break;                   /* and back */
+    case 1003: if (test_toggle) dump_frame(display, "12b-toggled-back"); break;
+    case 1040: if (test_gone && present_ok) present_test_gone(30); break;                 /* 30 frames as with no device: skipped */
+    case 1080: if (test_gone) dump_frame(display, "13-after-no-device"); break;
+    case 1100: if (test_recover && present_ok) escmenu_test_recover(); break;             /* a new device, as the recovery makes one */
+    case 1103: if (test_recover) dump_frame(display, "14a-recovered"); break;
+    case 1160: if (test_bad_w && esc_menu) escmenu_test_any_size(test_bad_w, test_bad_h); break;   /* (fullscreen: Reset refused, rollback) */
+    case 1200: if (test_bad_w) dump_frame(display, "15-after-bad-size"); break;
     }
 }
 
@@ -1872,6 +2199,7 @@ static void __fastcall hook_render(void *runtime) {
         }
         palette_rgb(display);
         if (!land_ok) land_setup(display);
+        bg_start();                         /* (the land's copies made ahead, in the background: see bg_builder) */
         trail_frame(world);
         auto_zoom_frame();
         frame_display = display;
@@ -1879,7 +2207,7 @@ static void __fastcall hook_render(void *runtime) {
         frame_zoom = eff_zoom();
         live_tick = GetTickCount();
     }
-    if (esc_menu) escmenu_frame(runtime);
+    if (esc_menu || present_ok) escmenu_frame(runtime);
     original_render(runtime);
     if (frame_display) {
         frames++;
@@ -1986,7 +2314,7 @@ static const escmenu_options menu_options = { opt_count, opt_label, opt_click };
 static LRESULT CALLBACK on_message(int code, WPARAM wp, LPARAM lp) {
     MSG *m = (MSG *)lp;
     if (code == HC_ACTION && wp == PM_REMOVE && m) {
-        if (esc_menu && escmenu_message(m)) m->message = WM_NULL;
+        if ((esc_menu || present_ok) && escmenu_message(m)) m->message = WM_NULL;
         else if (wbuf && GetTickCount() - live_tick < 1000) {
             if (m->message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
                 set_goal(zoom_step(zoom_goal, GET_WHEEL_DELTA_WPARAM(m->wParam) / (double)WHEEL_DELTA, cfg.step), "Ctrl + wheel");
@@ -2196,6 +2524,7 @@ static void install(void) {
     read_settings(exe);
     QueryPerformanceFrequency(&clock_freq);
     test_mode = GetEnvironmentVariableA("WKMAPZOOM_TEST", path, sizeof(path)) > 0;
+    test_checks = test_mode && GetEnvironmentVariableA("WKMAPZOOM_TEST_NOCHECK", NULL, 0) == 0;
     if (test_mode) {
         DWORD k = GetEnvironmentVariableA("WKMAPZOOM_DUMP", dump_dir, sizeof(dump_dir));
         char res[32];
@@ -2214,11 +2543,26 @@ static void install(void) {
         test_esc = GetEnvironmentVariableA("WKMAPZOOM_TEST_ESC", res, sizeof(res)) > 0 ? (!lstrcmpiA(res, "options") ? 2 : 1) : 0;
         if (GetEnvironmentVariableA("WKMAPZOOM_TEST_ZOOM", res, sizeof(res)) > 0) test_zoom = atof(res);
         if (GetEnvironmentVariableA("WKMAPZOOM_TEST_AUTOZOOM", res, sizeof(res)) > 0) auto_zoom = 1;
-        *(int32_t *)VA(OPT_WINDOWED_VA) = 1;
+        test_toggle = GetEnvironmentVariableA("WKMAPZOOM_TEST_TOGGLE", res, sizeof(res)) > 0;
+        if (GetEnvironmentVariableA("WKMAPZOOM_TEST_CHAT", res, sizeof(res)) > 0) { test_chat = 1; if (!strcmp(res, "off")) escmenu_test_chatfix(0); }
+        test_gone = GetEnvironmentVariableA("WKMAPZOOM_TEST_GONE", res, sizeof(res)) > 0;
+        test_recover = GetEnvironmentVariableA("WKMAPZOOM_TEST_RECOVER", res, sizeof(res)) > 0;
+        if (GetEnvironmentVariableA("WKMAPZOOM_TEST_BADSIZE", res, sizeof(res)) > 0 && sscanf(res, "%dx%d", &test_bad_w, &test_bad_h) != 2)
+            test_bad_w = test_bad_h = 0;
+        if (GetEnvironmentVariableA("WKMAPZOOM_TEST_FULLSCREEN", res, sizeof(res)) > 0) {   /* WxH (a monitor mode), or 1: the desktop's */
+            DEVMODEA dm;
+            memset(&dm, 0, sizeof(dm));
+            dm.dmSize = sizeof(dm);
+            test_fullscreen = 1;
+            if (sscanf(res, "%dx%d", &tw, &th) != 2 && EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
+                tw = (int)dm.dmPelsWidth; th = (int)dm.dmPelsHeight;
+            }
+        }
+        *(int32_t *)VA(OPT_WINDOWED_VA) = test_fullscreen ? 0 : 1;
         *(int32_t *)VA(OPT_DISPLAY_X_VA) = tw; *(int32_t *)VA(OPT_DISPLAY_Y_VA) = th;
         *(int32_t *)VA(OPT_WINDOW_X_VA) = tw; *(int32_t *)VA(OPT_WINDOW_Y_VA) = th;
         *(int32_t *)VA(OPT_RENDERER_VA) = 4;
-        say("test mode: windowed %dx%d, scripted zoom, frames to %s", tw, th, dump_dir);
+        say("test mode: %s %dx%d, scripted zoom, frames to %s", test_fullscreen ? "fullscreen" : "windowed", tw, th, dump_dir);
     }
     say("WA starts at %dx%d, %s, renderer %d (its options as read)", *(int32_t *)VA(OPT_DISPLAY_X_VA), *(int32_t *)VA(OPT_DISPLAY_Y_VA),
         *(int32_t *)VA(OPT_WINDOWED_VA) ? "windowed" : "fullscreen", *(int32_t *)VA(OPT_RENDERER_VA));
@@ -2239,7 +2583,9 @@ static void install(void) {
         if ((s = MH_CreateHook((void *)VA(hooks[i].va), hooks[i].detour, hooks[i].orig)) != MH_OK)
             say("could not hook %s (%d)", hooks[i].name, (int)s);
     if (s == MH_OK) {
-        if (true_colour) tc_ok = present_install(base, compose, say);
+        if (true_colour || esc_menu) present_ok = present_install(base, true_colour ? compose : NULL, say);
+        tc_ok = true_colour && present_ok;
+        if ((esc_menu || present_ok) && !escmenu_base(base, say)) esc_menu = 0;   /* (the game's end hooked) */
         strcpy(dir, exe);
         if ((slash = strrchr(dir, '\\')) != NULL) *slash = 0;
         if (colour_maps && !colourmap_install(base, dir, map_theme, say)) colour_maps = 0;
@@ -2272,6 +2618,7 @@ static void install(void) {
         }
         if (esc_menu && !escmenu_install(base, say, !test_mode)) esc_menu = 0;
         if (esc_menu) escmenu_set_options(&menu_options);
+        if (present_ok) present_on_gone(escmenu_recover, escmenu_device_back);   /* (no device: one made between frames) */
         s = MH_EnableHook(MH_ALL_HOOKS);
         if (s == MH_OK && follow_sites_install() < 2) say("the zoomed-in camera follow works at some of WA's calls only");
     }
