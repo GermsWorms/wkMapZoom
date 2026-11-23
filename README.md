@@ -14,11 +14,12 @@ size, and a small number (for example `150%`) shows the zoom while you change it
 > same way), and please [open an issue](https://github.com/GermsWorms/wkMapZoom/issues) with the log (see Notes; its
 > first line says "wkMapZoom 4.3 beta").
 
-![Auto zoom and the movement line on a rope race map](screenshots/auto-zoom.gif)
+![Auto zoom, the speedometer and the movement line coloured by speed on a rope race map](screenshots/auto-zoom.gif)
 
-*The auto zoom on a big rope race map: it eases out as the worm heads into the open and back in where it gets tight
-(the number top right is the zoom), and at the turn's start the movement line shows where the worm went last turn (red
-in this capture; 4.3 colours it by speed).*
+*A big jump on a rope race map, with 4.3 beta. The auto zoom eases out to 38% as the worm heads into the open and goes
+back to 100% once it has landed (the number top right is the zoom), and the speedometer bottom right goes from blue to
+red. Then a cut to the next turn's start, where the movement line shows where the worm went last turn, coloured by speed
+(the jump is the long orange and red arc).*
 
 Also in the module:
 
@@ -38,12 +39,15 @@ Also in the module:
   earlier turns, and being knocked about in other players' turns, so the line always ends at the worm). It goes as soon
   as you move, or with "stays" it stays all turn. It follows the worm itself, so teleports (and the cursor while you
   aim them) are not drawn. *(4.3 beta)* It is coloured by how fast the worm went there, as the speedometer shows it:
-  blue slow, through green and yellow, red from the speed zoom's start speed (or all red: `TurnLineColour=red`).
+  blue slow, through cyan, green, yellow and orange, red from the speed zoom's start speed (or all red:
+  `TurnLineColour=red`).
 - **Speedometer** *(4.3 beta, on by default: Esc > Map zoom options > Speedometer, or `Speedometer=off`)*. The speed
   of the worm whose turn it is (yours in your turns) in pixels a second, as a see-through digital dial in the bottom
-  right corner (or just the number, or above the worm): a ring lit up to the speed, blue when slow and red from the
-  speed zoom's start speed, the turn's best and its average. WA caps a worm's speed at 1600 px/s straight down or
-  across and 2263 px/s diagonally (MAX on the dial).
+  right corner (or just the number, or above the worm): a ring lit up to the speed, blue when slow, through cyan, green,
+  yellow and orange, red from the speed zoom's start speed (the number takes the same colour), the turn's best and its
+  average. WA caps a worm's speed at 1600 px/s straight down or across and 2263 px/s diagonally (MAX on the dial).<br>
+  <a href="screenshots/speedometer.png"><img src="screenshots/speedometer-dial.png" width="240" alt="The speedometer's dial at 1678 px/s: the ring lit from blue to red, the number in red, and the turn's average under it"></a><br>
+  *The dial in the middle of the jump above, at 1678 px/s (shown larger than in the game; click it for the whole screen).*
 - **Speed zoom** *(4.3 beta, off until switched on in the Esc menu)*. Past a speed (800 px/s) the map zooms out, more
   the faster you go: x0.7 for every 500 px/s over.
 - **Default zoom** *(4.3 beta)*. The zoom each game starts at; Ctrl + middle click and numpad * go back to it, and the
@@ -67,8 +71,9 @@ Also in the module:
 | **800%** | |
 | ![800%](screenshots/zoom-800.png) | |
 
-The same race map at each zoom: the HUD at the bottom (timer, team bar, wind) and the zoom number stay the same size,
-while the map, the worm and its name zoom.
+The same moment at each zoom, at a turn's start: the HUD (timer, team bar, wind, messages), the speedometer and the zoom
+number stay the same size, while the map, the worm and its name zoom. The coloured line is the worm's last turn, the
+movement line.
 
 ## Install
 
