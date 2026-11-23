@@ -33,15 +33,20 @@ void escmenu_test_open(void);
 void escmenu_test_list(void);
 
 /* the module's own options, under a "Map zoom options" row of their own: each a row whose label shows its value and
- * whose click changes it (the menu is laid out again to show the change) */
+ * whose click changes it (the menu is laid out again to show the change). When WA's menu has no room for them all
+ * (its bitmap is a fixed 256 px; each team on WA's scoreboard above takes a row), they go in pages -- whole groups
+ * (options next to each other with the same group number) where they fit -- with a "More options (1/3)" row that
+ * shows the next page. group may be NULL (one group) */
 typedef struct {
     int (*count)(void);
     void (*label)(int i, char *out, size_t n);
     void (*click)(int i);
+    int (*group)(int i);
 } escmenu_options;
 void escmenu_set_options(const escmenu_options *o);
-/* for test mode: the options list opened (as a click on its row), and option i clicked */
+/* for test mode: the options list opened (as a click on its row), option i clicked, the next page shown */
 void escmenu_test_options(void);
 void escmenu_test_click(int i);
+void escmenu_test_more(void);
 
 #endif

@@ -6,10 +6,19 @@ Zoom the map in and out in **Worms Armageddon 3.8.1**: hold **Ctrl** and turn th
 Only the map zooms. The team bars, turn timer, wind, messages, chat, Esc menu and weapon menu stay their normal
 size, and a small number (for example `150%`) shows the zoom while you change it.
 
+> **Version 4.3 is a beta.** The files in [`release/`](release/) are 4.3 beta: it adds a speedometer, a speed zoom,
+> a default zoom, a movement line coloured by speed, zooming out on fast falls, the Esc menu's options in pages, and
+> zoomed out the camera stays where it is at 100% (it isn't pulled away from the level's edges). It is still being
+> tested. If something goes wrong, the last stable version is **4.2**: its files are in
+> [`release/` at 4.2](https://github.com/GermsWorms/wkMapZoom/tree/cc9b734/release) (put them in the WA folder the
+> same way), and please [open an issue](https://github.com/GermsWorms/wkMapZoom/issues) with the log (see Notes; its
+> first line says "wkMapZoom 4.3 beta").
+
 ![Auto zoom and the movement line on a rope race map](screenshots/auto-zoom.gif)
 
 *The auto zoom on a big rope race map: it eases out as the worm heads into the open and back in where it gets tight
-(the number top right is the zoom), and at the turn's start the red line shows where the worm went last turn.*
+(the number top right is the zoom), and at the turn's start the movement line shows where the worm went last turn (red
+in this capture; 4.3 colours it by speed).*
 
 Also in the module:
 
@@ -21,22 +30,34 @@ Also in the module:
   Windowed switch, applied at once without restarting WA. The display is set up again the way WA does it at every
   game's start (on the same Direct3D device), a size the screen refuses is taken back, and the chat is laid out again
   for the new width.
-- **Options in the Esc menu.** "Map zoom options" in WA's Esc menu opens the module's options: auto zoom on / off, how
-  far it may zoom out and in, the red line, and the zoom number. Click an option to change it; it is saved in
-  `wkMapZoom.ini` at once.
-- **Movement line.** When your turn starts, a red line shows where the worm you are playing has been: its last turn
+- **Options in the Esc menu.** "Map zoom options" in WA's Esc menu opens the module's options (in pages when WA's
+  menu has no room for them all: "More options" shows the next): the default zoom, the zoom number, the movement line and its colour; the auto
+  zoom; the speedometer and the speed zoom. Click an option to change it; it is saved in `wkMapZoom.ini` at once.
+- **Movement line.** When your turn starts, a line shows where the worm you are playing has been: its last turn
   bright, fading in towards where it stopped (so you can see which way you were going), everything else dimmer (its
   earlier turns, and being knocked about in other players' turns, so the line always ends at the worm). It goes as soon
   as you move, or with "stays" it stays all turn. It follows the worm itself, so teleports (and the cursor while you
-  aim them) are not drawn.
+  aim them) are not drawn. *(4.3 beta)* It is coloured by how fast the worm went there, as the speedometer shows it:
+  blue slow, through green and yellow, red from the speed zoom's start speed (or all red: `TurnLineColour=red`).
+- **Speedometer** *(4.3 beta, on by default: Esc > Map zoom options > Speedometer, or `Speedometer=off`)*. The speed
+  of the worm whose turn it is (yours in your turns) in pixels a second, as a see-through digital dial in the bottom
+  right corner (or just the number, or above the worm): a ring lit up to the speed, blue when slow and red from the
+  speed zoom's start speed, the turn's best and its average. WA caps a worm's speed at 1600 px/s straight down or
+  across and 2263 px/s diagonally (MAX on the dial).
+- **Speed zoom** *(4.3 beta, off until switched on in the Esc menu)*. Past a speed (800 px/s) the map zooms out, more
+  the faster you go: x0.7 for every 500 px/s over.
+- **Default zoom** *(4.3 beta)*. The zoom each game starts at; Ctrl + middle click and numpad * go back to it, and the
+  wheel stops on it on the way through.
 - **Speed.** The zoomed map is drawn on all of the PC's cores, with SSE2, and the land's zoomed-out copies are made
   ahead of time in the background, so changing the zoom doesn't stall.
 - **Auto zoom** (Ctrl + A, the Esc menu, or `AutoZoom=1`): the map zooms on its own to fit the space around your worm.
   Where it opens up it zooms out, already as you head into the open, and where it is tight (a time trial map) it zooms
   in. In an ordinary map it stays at your zoom. It looks at where the walls actually are (thin 1-2 px walls too; blown-up
   holes count as open), changes slowly, never zooms out past where the whole level fits the screen, and never moves the
-  camera. The wheel still works: your zoom is the base the auto zoom works from.
-- **Zoomed-in camera.** Zoomed in, the camera keeps your worm within the part of the map you can see.
+  camera. The wheel still works: your zoom is the base the auto zoom works from. *(4.3 beta)* Falling fast (1000 px/s
+  down) it zooms out until the ground below is on screen.
+- **Camera.** Zoomed in, the camera keeps your worm within the part of the map you can see. *(4.3 beta)* Zoomed out it
+  stays where it is at 100%, so near the level's edges it isn't pulled toward the middle (the area past the edge shows).
 
 | 25% | 50% |
 |---|---|
@@ -62,9 +83,9 @@ while the map, the worm and its name zoom.
 |---|---|
 | **Ctrl + mouse wheel** | zoom in / out |
 | **Numpad + / −** | zoom in / out |
-| **Ctrl + middle click**, **numpad \*** | back to 100% |
+| **Ctrl + middle click**, **numpad \*** | back to the default zoom (100% unless you change it) |
 | **Ctrl + A** | auto zoom on / off |
-| **Esc** | WA's menu, now with Resolution, Display and Map zoom options |
+| **Esc** | WA's menu, now with Resolution, Display and Map zoom options (in pages: More options) |
 
 Uninstall: delete `wkMapZoom.dll`.
 
@@ -79,7 +100,8 @@ Uninstall: delete `wkMapZoom.dll`.
 - Zoomed in, the camera follows your worm within the part of the map you can see; at 100% and below it follows as
   WA always does.
 - The movement line is per worm: each of a team's worms has its own, shown at that worm's turns. It is kept for the
-  whole game and starts again with the next game. In real-time play (wkRealTime) there is none.
+  whole game and starts again with the next game. In real-time play (wkRealTime), where several worms have the turn at
+  once, there is no movement line, speedometer, auto zoom or speed zoom.
 - The movement line is drawn only on your own screen, like everything else here: it shows where each worm has been,
   which everyone watching the game saw happen.
 - True colour needs WA's renderer set to one of its Direct3D 9 options; on the others the map is shown in WA's own 256
@@ -105,14 +127,22 @@ Uninstall: delete `wkMapZoom.dll`.
 | `Step` | `1.15` | zoom per wheel notch or numpad press |
 | `Smooth` | `1` | glide to the new zoom (0 = jump) |
 | `Filter` | `smooth` | `smooth`: each screen pixel is the average of the map pixels it covers, so thin walls stay visible zoomed out and pixels stay even zoomed in; `nearest`: plain pixel picking |
-| `Indicator` | `zooming` | the zoom number: `zooming` (shown while zooming, then fades), `always` (stays while not at 100%), `off` |
+| `Indicator` | `zooming` | the zoom number: `zooming` (shown while zooming, then fades), `always` (stays while not at the default zoom), `off` |
 | `IndicatorPlace` | `top-right` | or `top-left`, `top`, `bottom-right`, `bottom-left`, `bottom` |
 | `NumpadKeys` | `1` | numpad + / − / \* zoom (0 = left to WA) |
+| `DefaultZoom` | `1` | the zoom each game starts at, and that Ctrl + middle click and numpad \* go back to (0.7 = 70%; `70%` works too; the Esc menu sets it) |
 | `AutoZoom` | `0` | the auto zoom on (Ctrl + A and the Esc menu switch it, and save it here) |
-| `AutoZoomMin` | `0.35` | the furthest the auto zoom goes out (0.35 = 35%; 1 = never out) |
+| `AutoZoomMin` | `0.35` | the furthest the auto zoom (and the speed zoom) goes out, as a share of your own zoom (0.35 = 35% at 100%; 1 = never out) |
 | `AutoZoomMax` | `1.5` | the furthest the auto zoom goes in (1.5 = 150%; 1 = never in) |
+| `AutoZoomFallSpeed` | `1000` | the auto zoom keeps the ground below in view only while the worm falls at least this fast (px/s down; 0 = always, above 1600 = never) |
+| `SpeedZoom` | `0` | the speed zoom: past a speed the map zooms out, more the faster your worm goes (on its own, or on top of the auto zoom; never further out than `AutoZoomMin`) |
+| `SpeedZoomFrom` | `800` | the speed it starts at, in pixels a second (the speedometer goes red there) |
+| `SpeedZoomStrength` | `0.7` | the zoom times this for every 500 px/s over the start speed (0.7 from 800: x0.7 at 1300 px/s, x0.49 at 1800) |
+| `Speedometer` | `dial` | your worm's speed: `dial` (a digital gauge), `number` (the number alone) or `off` |
+| `SpeedometerPlace` | `corner` | `corner` (bottom right, above WA's wind bar) or `worm` (just above your worm's name) |
 | `TurnLine` | `all` | the movement line at your turn's start: `all` (the whole game, its last turn bright), `last` (its last turn), `off` |
 | `TurnLineKeep` | `0` | 1 = the movement line stays all turn ("stays" in the Esc menu); 0 = it goes once you move |
+| `TurnLineColour` | `speed` | `speed`: the line coloured by how fast the worm went there, as the speedometer (blue slow, red from the speed zoom's start speed); `red`: all red |
 | `TrueColour` | `1` | true-colour output on Direct3D 9 (0 = WA's 256 colours) |
 | `ColourMaps` | `1` | full-colour PNG / JPEG maps in `User\SavedLevels` |
 | `MapTheme` | `Forest` | the WA theme full-colour maps get (the soil behind craters, the backdrop) |
@@ -131,14 +161,25 @@ shared out across the CPU's cores. The map ends up as an RGB picture: it goes in
 palette colours, WA draws the HUD on top as usual, and on Direct3D 9 the frame is shown in true colour (the map's
 pixels as averaged, the HUD's as WA drew them).
 
-WA's camera clamp is given the size the zoomed view sees, so the camera reaches the level's edges, and zoomed in its
-camera follow is given the size of what you see, so it keeps up with the worm. The movement line follows the current
+Zoomed in, WA's camera clamp is given the size the zoomed view sees, so the camera reaches the level's edges, and its
+camera follow the size of what you see, so it keeps up with the worm; zoomed out both are left as WA has them at
+100%, so the camera stays where it is at 100% (the area past the level's edge shows). The movement line follows the current
 worm of the team whose turn it is (WA's team tasks, and the worms themselves through their physics step), every 2 pixels it moves, and is
 drawn into the map's picture so it zooms with the map. The auto zoom casts 16 rays, a pixel at a time, from the turn's
 worm and from where it is heading (its speed times 0.5 to 2 seconds) through the land several times a second. Each
 ray's end wants the zoom that puts it 80% of the way to the screen's edge in its direction; the 8 most open directions,
-averaged, say how open it is there: open zooms out, ordinary stays at 100%, tight zooms in. The zoom then eases there,
-slowly, and only after a clear change. The zoom number is drawn into WA's frame in WA's own palette.
+averaged, say how open it is there: open zooms out, ordinary stays at 100%, tight zooms in. While your worm falls
+fast (1000 px/s down), the ray straight down comes first: the zoom goes out until the ground below is on screen (with
+a quarter of the drop, at most 200 px, past it), so falling down a shaft zooms out. The zoom then eases there,
+slowly, and only after a clear change. The speed zoom multiplies that by the strength once for every 500 px/s your
+worm goes over its start speed (the speed held for a moment, so a swing's slow top doesn't pump the zoom). The zoom
+number is drawn into WA's frame in WA's own palette.
+
+The speedometer shows the speed of the turn's worm as the game has it (WA moves things 50 times a second; walking
+is measured from the worm's path): a ring of segments lit up to the speed, blue when slow, red from the speed zoom's
+start speed on, the speed in digital digits, the turn's best (one lit segment) and its average (a white mark and "avg").
+WA caps a worm's speed at 32 pixels a move each way: 1600 px/s straight down or across, 2263 px/s diagonally (MAX on
+the dial). In true colour the dial is blended in smoothly over the map; otherwise it goes into WA's own colours.
 
 Hooks (WA 3.8.1, checked by the SHA-256 of `WA.exe`, or of its code section with its sections where 3.8.1 has them,
 and the original bytes at each hook point):
@@ -167,7 +208,8 @@ to 800% against a plain draw-then-average reference, the SSE2 rows bit for bit a
 shrunk copies following a blown-up land, and the background builder and the drawing threads sharing the land's tiles)
 and the
 full-colour maps (`colourmap_test`: a PNG and a JPEG opened the way WA opens maps, the copy WA gets taken apart and
-matched back to the original).
+matched back to the original), the speedometer's pictures (`speedo_test`: every size and speed painted with guard
+words; with a folder it writes them out to look at) and the WA.exe check (`guard_test`).
 
 ## Other zoom modules for W:A
 

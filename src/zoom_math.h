@@ -51,10 +51,25 @@ static void zoom_limits(int sw, int sh, int gw, int gh, const zoom_cfg *c, doubl
 static double zoom_clamp(double z, double lo, double hi) { return zoom_clampd(z, lo, hi); }
 
 /* a wheel turn of `notches` (part notches allowed): 100% is a stop on the way through */
-static double zoom_step(double z, double notches, double step) {
+static inline double zoom_step(double z, double notches, double step) {
     double n = z * pow(step, notches);
     if ((z < 1.0 && n > 1.0) || (z > 1.0 && n < 1.0) || fabs(log(n)) < 0.02) n = 1.0;
     return n;
+}
+
+/* the same with a second stop (the default zoom; 0 or 1: none): of the stops passed or landed near, the nearer one -- a
+ * stop landed near only when the step went toward it (so a touchpad's small turns can leave a stop) */
+static double zoom_step2(double z, double notches, double step, double stop) {
+    const double n = z * pow(step, notches), stops[2] = { 1.0, stop };
+    double best = 0.0;
+    int k;
+    for (k = 0; k < 2; k++) {
+        const double s = stops[k];
+        if (!(s > 0.0) || !((z < s && n > s) || (z > s && n < s) || (fabs(log(n / s)) < 0.02 && fabs(log(n / s)) < fabs(log(z / s)))))
+            continue;
+        if (best == 0.0 || fabs(log(s / z)) < fabs(log(best / z))) best = s;
+    }
+    return best > 0.0 ? best : n;
 }
 
 /* the zoom eased toward the goal over dt seconds (even steps in log scale), landing on it exactly */

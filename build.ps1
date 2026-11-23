@@ -9,6 +9,7 @@ $opt = @('-O2', '-Wall', '-Wextra', '-std=c99', '-msse2', '-mfpmath=sse', '-fno-
 $tests = @(
     @('zoom_math_test', @()),
     @('zoom_badge_test', @()),
+    @('speedo_test', @()),
     @('raster_test', @((Join-Path $here 'src\raster.c'))),
     @('colourmap_test', @((Join-Path $here 'src\colourmap.c'))),
     @('guard_test', @())

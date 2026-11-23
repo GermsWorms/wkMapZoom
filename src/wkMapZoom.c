@@ -38,8 +38,9 @@
  *   queue); and present.c, colourmap.c, escmenu.c's own
  *
  * Settings (all optional) in wkMapZoom.ini beside WA.exe, section [wkMapZoom]: MaxOut, MaxIn, Step, Smooth, Filter,
- * Indicator, IndicatorPlace, NumpadKeys, TrueColour, ColourMaps, MapTheme, EscMenu, TurnLine, TurnLineKeep, AutoZoom,
- * AutoZoomMin, AutoZoomMax (see the README; the Esc menu's options write theirs back).
+ * Indicator, IndicatorPlace, NumpadKeys, DefaultZoom, TrueColour, ColourMaps, MapTheme, EscMenu, TurnLine, TurnLineKeep,
+ * TurnLineColour, AutoZoom, AutoZoomMin, AutoZoomMax, AutoZoomFallSpeed, SpeedZoom, SpeedZoomFrom, SpeedZoomStrength, Speedometer,
+ * SpeedometerPlace (see the README; the Esc menu's options write theirs back).
  * Log: %LOCALAPPDATA%\wkMapZoom\wkMapZoom.log.
  *
  * Test mode (environment WKMAPZOOM_TEST=1, for an isolated copy of WA only): the in-memory options become windowed
@@ -55,7 +56,8 @@
  * recovery does at 1100, WKMAPZOOM_TEST_FULLSCREEN=1 (or WxH) a fullscreen start, WKMAPZOOM_TEST_BADSIZE=WxH a size that
  * is no monitor mode asked for at 1160 (fullscreen: its rollback), WKMAPZOOM_TEST_CHAT=1 chat lines before and after
  * the switch with the chat's layout checked (=off: the chat's re-layout off, to see the old way);
- * a movement line's first two showings are saved too.
+ * a movement line's first two showings are saved too, and the speedometer at the first three moments over 700 px/s;
+ * WKMAPZOOM_TEST_DUMPAT=700,1200 saves those frames (at-<frame>) with where the turn's worm is on the screen.
  * MinHook (third_party/minhook) is BSD licensed. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -71,6 +73,7 @@
 #include "image_guard.h"
 #include "zoom_math.h"
 #include "zoom_badge.h"
+#include "speedo.h"
 #include "raster.h"
 #include "present.h"
 #include "colourmap.h"
@@ -176,6 +179,8 @@ static int filter_smooth = 1, numpad_keys = 1, true_colour = 1, colour_maps = 1,
 static int tc_ok;                       /* the true-colour hooks are on */
 static int present_ok;                  /* the show-frame hooks are on (true colour, and the display safety net) */
 static double zoom_now = 1.0, zoom_goal = 1.0, zoom_lo = 1.0, zoom_hi = 1.0;
+static double zoom_default = 1.0;       /* DefaultZoom=: each game starts at it; Ctrl + middle click and numpad * go back
+                                           to it (within the zoom range) */
 static double frame_zoom = 1.0;         /* the zoom this frame is drawn at (fixed at GameRender's start) */
 static double eff_zoom(void);           /* the zoom shown: the wheel's times the auto zoom's share */
 static void *frame_display, *last_world, *frame_grid;
@@ -229,15 +234,42 @@ static DWORD ind_msg_tick;
 #define TRAIL_PER_TEAM 16
 #define TRAIL_WORMS 64
 #define TRAIL_MAX 32768
-typedef struct { float x, y; int32_t turn; int16_t brk, own; } tpoint;   /* turn: the game's turn it was in; brk: not
-                                                               joined to the point before (a jump); own: in the worm's own
-                                                               turn (or right after it, before the next team's) */
+typedef struct { float x, y; int32_t turn; int8_t brk, own; uint16_t spd; } tpoint;   /* turn: the game's turn it was
+                                                               in; brk: not joined to the point before (a jump); own: in
+                                                               the worm's own turn (or right after it, before the next
+                                                               team's); spd: the worm's speed there (px/s, the game's) */
+static int trail_colour = 1;            /* TurnLineColour=: 1 speed (the speedometer's colours: blue slow, red from the
+                                           speed zoom's start), 0 red */
+static double speed_from;               /* (SpeedZoomFrom: defined with the speed zoom) */
 typedef struct { tpoint *pt; int n, cap; } team_trail;
 static team_trail *trails;              /* by worm: its team (a team task's +0x38) * TRAIL_PER_TEAM + its number in it */
 static uintptr_t team_tasks[TRAIL_TEAMS], worm_objs[TRAIL_WORMS];
 static int worms_ok;                    /* the team task and physics step hooks are on (the line, the auto zoom) */
+/* the Esc menu's options (Map zoom options), in their order: general (with the movement line), the auto zoom's, speed
+ * (the speedometer and the speed zoom) -- a page each when WA's menu has no room for all (escmenu.c) */
+enum { OPT_DEFAULT, OPT_NUMBER, OPT_LINE, OPT_LINE_COLOUR, OPT_AUTO, OPT_AUTO_OUT, OPT_AUTO_IN, OPT_SPEEDO, OPT_SPEEDO_PLACE,
+       OPT_SPEED, OPT_SPEED_FROM, OPT_SPEED_STRENGTH, OPT_COUNT };   /* (12: escmenu.c's MAX_OPTS) */
+static int spd_cam, spd_cx, spd_cy, spd_ox, spd_oy;   /* WA's camera transform this frame (the speedometer's: see */
+static double spd_z;                                  /* queue_hook); spd_cam: seen this frame */
 static int turn_worm_ok;                /* where the turn's worm is, this frame */
 static double turn_wx, turn_wy;
+static double turn_gv, turn_gvy;        /* its speed as the game has it, and its downward part (px/s; team_worm) */
+/* The speedometer (the owner, 2026-11-22; speedo.h): the turn's worm's speed, as a digital dial or the number alone,
+ * in the screen's bottom right corner (above WA's wind bar) or just above the worm's name. Speedometer= dial / number /
+ * off, SpeedometerPlace= corner / worm, and the Esc menu */
+static int speedo = 1, speedo_place;    /* 0 off, 1 dial, 2 number; 0 the corner, 1 above the worm */
+static double spd_now, spd_disp, spd_best, spd_dist, spd_time;  /* the speed; shown (eased); the turn's best, and how
+                                                                  far and how long it moved (the average) */
+static double spd_lx, spd_ly, spd_moved;   /* where the worm was last frame; when it last moved (s) */
+static int spd_turn = -1, spd_will;     /* spd_will: the speedometer is drawn this frame (set before WA draws it:
+                                           queue_hook takes the module's path for it) */
+static int turn_key = -1, track_key = -1, track_turn = -1;   /* the turn's worm (team x 64 + its number), and whose
+                                                                and which turn's the track is */
+/* a picture over the true-colour frame (compose blends it in: premultiplied A8R8G8B8, ov_w x ov_h at ov_x0, ov_y0) */
+static const uint32_t *ov_img;
+static int ov_on, ov_x0, ov_y0, ov_w, ov_h;
+static uint8_t lut12[4096];             /* the palette's nearest colour for each 4-bit R, G, B (the speedometer's) */
+static int lut12_ok;
 static int team_flags[TRAIL_TEAMS], n_team_tasks, n_worm_objs, trail_on = 1, trail_all = 1, trail_show = -1, trail_hl;
 static int trail_keep;                  /* TurnLineKeep=1: the line stays all turn, also while the worm moves */
 static int trail_kept_at = -1;          /* (test: the frame the worm moved with its line kept) */
@@ -1128,6 +1160,16 @@ static void compose_rows(int y0, int y1, int k) {
         } else {
             for (x = 0; x < cj.w; x++) d[x] = pal32[f[x]];
         }
+        if (ov_on && y >= ov_y0 && y < ov_y0 + ov_h) {   /* the overlay (the speedometer), premultiplied */
+            const uint32_t *o = ov_img + (size_t)(y - ov_y0) * ov_w;
+            const int xa = ov_x0 < 0 ? 0 : ov_x0, xb = ov_x0 + ov_w > cj.w ? cj.w : ov_x0 + ov_w;
+            for (x = xa; x < xb; x++) {
+                const uint32_t c = o[x - ov_x0], a = c >> 24, na = 255u - a, b = d[x];
+                if (!a) continue;
+                d[x] = (((c >> 16) & 0xff) + ((b >> 16) & 0xff) * na / 255u) << 16 |
+                       (((c >> 8) & 0xff) + ((b >> 8) & 0xff) * na / 255u) << 8 | ((c & 0xff) + (b & 0xff) * na / 255u);
+            }
+        }
     }
 }
 static int compose(uint8_t *bits, int pitch, int w, int h) {
@@ -1167,7 +1209,13 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
     LARGE_INTEGER t0, t1, t1b, t2;
     static unsigned checks;
     int check = 0;
-    if ((z == 1.0 && !colour_land && !(trail_visible && trail_show >= 0 && trail_hl)) || display != frame_display || !wbuf || !rgb || !n || n > MAX_ENTRIES)
+    if (display == frame_display && camera) {   /* (the speedometer's: WA's camera transform this frame, screen = origin
+                                                   + (world - camera) x zoom, as the movement line's) */
+        spd_cx = ((const int32_t *)camera)[0] >> 16; spd_cy = ((const int32_t *)camera)[1] >> 16;
+        spd_ox = FIELD(display, D_ORG); spd_oy = FIELD(display, D_ORG + 4); spd_z = z;
+        spd_cam = 1;
+    }
+    if ((z == 1.0 && !colour_land && !(trail_visible && trail_show >= 0 && trail_hl) && !(spd_will && tc_ok && present_live())) || display != frame_display || !wbuf || !rgb || !n || n > MAX_ENTRIES)
         return call_queue(queue, display, camera);
     QueryPerformanceCounter(&t0);
     {   /* the frame grid brought up to date if it describes another frame than the renderer's (as WA's lock would: a
@@ -1296,12 +1344,14 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
     return last;
 }
 
-/* the camera's clamp told the size the zoomed view sees (never more than the level), so it reaches the level's edges */
+/* zoomed in, the camera's clamp told the size the zoomed view sees, so it reaches the level's edges; zoomed out it is
+ * left as WA has it at 100% (the owner, 2026-11-22: told the bigger view, it pushed the camera toward the level's middle
+ * near an edge as the map zoomed out -- now the camera stays where it is at 100%, and past the edge shows) */
 void __cdecl clamp_hook(uint32_t *regs) {
     /* pushal: edi esi ebp esp ebx edx ecx eax, then the return address and the arguments */
     double z = frame_zoom;
     int32_t width, height, left, top, right, bottom, span_w, span_h;
-    if (z == 1.0 || !frame_display) return;
+    if (z <= 1.0 || !frame_display) return;
     width = (int32_t)regs[7]; height = (int32_t)regs[10];
     left = (int32_t)regs[11]; top = (int32_t)regs[12]; right = (int32_t)regs[13]; bottom = (int32_t)regs[6];
     span_w = (right - left) >> 16; span_h = (bottom - top) >> 16;
@@ -1372,8 +1422,9 @@ static void trail_reset(void) {
     trail_drops++;                          /* (a kept line mask is out of date) */
 }
 
-/* a team's current worm and where it is (px); 0 when it isn't known */
-static int team_worm(uintptr_t task, void *world, double *x, double *y) {
+/* a team's current worm and where it is (px); 0 when it isn't known. v (may be NULL): its speed as the game has it
+ * (+0x90 / +0x94: its move each step, 1/65536 px; WA steps 50 times a second), in px/s */
+static int team_worm(uintptr_t task, void *world, double *x, double *y, double *v) {
     const int32_t team = *(int32_t *)(task + 0x38), index = *(int32_t *)(task + 0x48);
     int i;
     for (i = 0; i < n_worm_objs; i++) {
@@ -1381,6 +1432,10 @@ static int team_worm(uintptr_t task, void *world, double *x, double *y) {
         if (*(int32_t *)(o + 0xfc) == team && *(int32_t *)(o + 0x100) == index) {
             *x = *(int32_t *)(o + 0x84) / 65536.0;
             *y = *(int32_t *)(o + 0x88) / 65536.0;
+            if (v) {                        /* (the turn's worm: its downward speed kept too, for the auto zoom) */
+                *v = hypot(*(int32_t *)(o + 0x90) / 65536.0, *(int32_t *)(o + 0x94) / 65536.0) * 50.0;
+                turn_gvy = *(int32_t *)(o + 0x94) / 65536.0 * 50.0;
+            }
             (void)world;
             return 1;
         }
@@ -1388,7 +1443,7 @@ static int team_worm(uintptr_t task, void *world, double *x, double *y) {
     return 0;
 }
 
-static void trail_add(team_trail *t, double x, double y, int own) {
+static void trail_add(team_trail *t, double x, double y, int own, double spd) {
     tpoint *e, *p;
     e = t->n ? &t->pt[t->n - 1] : NULL;
     if (e && fabs(x - e->x) < 2.0 && fabs(y - e->y) < 2.0 && e->own == own) return;
@@ -1411,8 +1466,9 @@ static void trail_add(team_trail *t, double x, double y, int own) {
     p = &t->pt[t->n++];
     p->x = (float)x; p->y = (float)y;
     p->turn = trail_turn;
-    p->brk = (int16_t)(!e || fabs(x - e->x) > 80.0 || fabs(y - e->y) > 80.0);
-    p->own = (int16_t)own;
+    p->brk = (int8_t)(!e || fabs(x - e->x) > 80.0 || fabs(y - e->y) > 80.0);
+    p->own = (int8_t)own;
+    p->spd = (uint16_t)(spd < 0.0 ? 0.0 : spd > 65535.0 ? 65535.0 : spd);
 }
 
 /* each frame, before WA's own drawing: the worms still there, turns starting and ending, the worm's place noted, the
@@ -1488,7 +1544,10 @@ static void trail_frame(void *world) {
     }
     if (flagged > 1 && !trail_multi) { trail_multi = 1; say("several teams have the turn at once (real-time play?): no movement line"); }
     if (trail_multi) return;
-    if (trail_owner >= 0 && owner_task && team_worm(owner_task, world, &turn_wx, &turn_wy)) turn_worm_ok = 1;   /* (the auto zoom's) */
+    if (trail_owner >= 0 && owner_task && team_worm(owner_task, world, &turn_wx, &turn_wy, &turn_gv)) {
+        turn_worm_ok = 1;
+        turn_key = trail_owner * 64 + (*(int32_t *)(owner_task + 0x48) & 63);
+    }   /* (the auto zoom's) */
     if (!trail_on) return;
     {   /* every worm, every frame (knocked about in other turns too: its line ends where it is); "own" while it is the
          * current worm of the team that has (or last had) the turn */
@@ -1498,10 +1557,11 @@ static void trail_frame(void *world) {
             const int team = *(int32_t *)(o + 0xfc), index = *(int32_t *)(o + 0x100);
             if (team < 0 || team >= TRAIL_TEAMS || index < 0 || index >= TRAIL_PER_TEAM) continue;
             trail_add(&trails[team * TRAIL_PER_TEAM + index], *(int32_t *)(o + 0x84) / 65536.0, *(int32_t *)(o + 0x88) / 65536.0,
-                      team == trail_owner && index == owner_index);
+                      team == trail_owner && index == owner_index,
+                      hypot(*(int32_t *)(o + 0x90) / 65536.0, *(int32_t *)(o + 0x94) / 65536.0) * 50.0);
         }
     }
-    if (trail_owner < 0 || !owner_task || !team_worm(owner_task, world, &x, &y)) return;
+    if (trail_owner < 0 || !owner_task || !team_worm(owner_task, world, &x, &y, NULL)) return;
     {
         const int index = *(int32_t *)(owner_task + 0x48), slot = trail_owner * TRAIL_PER_TEAM + index;
         team_trail *tr;
@@ -1543,8 +1603,11 @@ static void trail_frame(void *world) {
  * owner's PC, 2026-11-22). A redraw and the blend are shared out by rows between the helper threads; each row keeps
  * the span its segments' boxes cover, so the blend and the next redraw's clear touch only those. Pixel for pixel the
  * same as drawing it afresh (the per-pixel formula is the same, and the max over segments doesn't depend on their order). */
-typedef struct { double x0, y0, x1, y1, a; } tseg;
-static uint8_t *trail_mask;
+typedef struct { double x0, y0, x1, y1, a; int c; } tseg;   /* c: its speed as a colour index (trail_lut) */
+static uint8_t *trail_mask, *trail_cmask;   /* (each pixel's coverage, and the colour index of the segment that gave it) */
+static uint32_t trail_lut[256];             /* colour index -> RGB (made again when the colours' settings change) */
+static int trail_lut_mode = -1;
+static double trail_lut_from = -1.0;
 static int16_t *trail_lo, *trail_hi;        /* per row: the mask's span [lo, hi) (lo >= hi: none) */
 static int trail_mask_n, trail_rows;
 static tseg *tsegs;
@@ -1573,7 +1636,7 @@ static void trail_segment_rows(const tseg *s, double half, int y0, int y1) {
     if (yb > y1) yb = y1;
     if (xa >= xb || ya >= yb) return;
     for (Y = ya; Y < yb; Y++) {
-        uint8_t *row = trail_target + (size_t)Y * sw;
+        uint8_t *row = trail_target + (size_t)Y * sw, *crow = trail_target == trail_mask ? trail_cmask + (size_t)Y * sw : NULL;
         if (trail_target == trail_mask) {
             if (xa < trail_lo[Y]) trail_lo[Y] = (int16_t)xa;
             if (xb > trail_hi[Y]) trail_hi[Y] = (int16_t)xb;
@@ -1590,7 +1653,7 @@ static void trail_segment_rows(const tseg *s, double half, int y0, int y1) {
             cov = reach - sqrt(d2);
             if (cov > 1.0) cov = 1.0;
             v = (uint8_t)(cov * a * 255.0);
-            if (v > row[X]) row[X] = v;
+            if (v > row[X]) { row[X] = v; if (crow) crow[X] = (uint8_t)s->c; }
         }
     }
 }
@@ -1601,7 +1664,10 @@ static void trail_clear_rows(int y0, int y1, int k) {
     int Y;
     (void)k;
     for (Y = y0; Y < y1; Y++) {
-        if (trail_lo[Y] < trail_hi[Y]) memset(trail_mask + (size_t)Y * sw + trail_lo[Y], 0, (size_t)(trail_hi[Y] - trail_lo[Y]));
+        if (trail_lo[Y] < trail_hi[Y]) {
+            memset(trail_mask + (size_t)Y * sw + trail_lo[Y], 0, (size_t)(trail_hi[Y] - trail_lo[Y]));
+            memset(trail_cmask + (size_t)Y * sw + trail_lo[Y], 0, (size_t)(trail_hi[Y] - trail_lo[Y]));
+        }
         trail_lo[Y] = INT16_MAX; trail_hi[Y] = 0;
     }
 }
@@ -1614,13 +1680,14 @@ static void trail_blend_rows(int y0, int y1, int k) {
     int X, Y;
     (void)k;
     for (Y = y0; Y < y1; Y++) {
-        const uint8_t *m = trail_mask + (size_t)Y * sw;
+        const uint8_t *m = trail_mask + (size_t)Y * sw, *cm = trail_cmask + (size_t)Y * sw;
         uint32_t *row = rgb + (size_t)Y * sw;
         for (X = trail_lo[Y]; X < trail_hi[Y]; X++) {
-            const uint32_t w = m[X], o = row[X];
+            const uint32_t w = m[X], o = row[X], c = trail_lut[cm[X]];
             if (!w) continue;
-            row[X] = ((((o >> 16) & 255u) * (255u - w) + 235u * w) / 255u) << 16 | ((((o >> 8) & 255u) * (255u - w) + 30u * w) / 255u) << 8 |
-                     (((o & 255u) * (255u - w) + 30u * w) / 255u);
+            row[X] = ((((o >> 16) & 255u) * (255u - w) + ((c >> 16) & 255u) * w) / 255u) << 16 |
+                     ((((o >> 8) & 255u) * (255u - w) + ((c >> 8) & 255u) * w) / 255u) << 8 |
+                     (((o & 255u) * (255u - w) + (c & 255u) * w) / 255u);
         }
     }
 }
@@ -1628,7 +1695,7 @@ static void trail_blend_rows(int y0, int y1, int k) {
 /* the segments of the shown line, in screen pixels (WA's camera transform: screen = world - camera, whole pixels);
  * points closer than 3 screen pixels to the last one drawn are passed over. 0: not all of them (no memory) */
 static int trail_segments(const team_trail *tr, double cx, double cy) {
-    double lx = 0.0, ly = 0.0;
+    double lx = 0.0, ly = 0.0, ls = 0.0;
     int i, first = -1, n_hl = 0, k = 0, have = 0;
     n_tsegs = 0;
     for (i = 0; i < tr->n; i++) if (tr->pt[i].own && tr->pt[i].turn == trail_hl) { if (first < 0) first = i; n_hl++; }
@@ -1640,7 +1707,7 @@ static int trail_segments(const team_trail *tr, double cx, double cy) {
         if (b->own && b->turn == trail_hl) { k = i - first; alpha = 0.5 + 0.5 * k / (n_hl > 1 ? n_hl - 1 : 1); }
         else if (!trail_all) { have = 0; continue; }
         else alpha = 0.35;
-        if (!have || b->brk) { lx = bx; ly = by; have = 1; continue; }
+        if (!have || b->brk) { lx = bx; ly = by; ls = b->spd; have = 1; continue; }
         if (fabs(bx - lx) < 3.0 && fabs(by - ly) < 3.0 && i + 1 < tr->n && !tr->pt[i + 1].brk) continue;
         if (n_tsegs == cap_tsegs) {
             const int cap = cap_tsegs ? cap_tsegs * 2 : 1024;
@@ -1649,8 +1716,12 @@ static int trail_segments(const team_trail *tr, double cx, double cy) {
             tsegs = ns; cap_tsegs = cap;
         }
         tsegs[n_tsegs].x0 = lx; tsegs[n_tsegs].y0 = ly; tsegs[n_tsegs].x1 = bx; tsegs[n_tsegs].y1 = by; tsegs[n_tsegs].a = alpha;
+        {   /* (its colour: the speed between its two ends, 0-255 over 0 to the dial's end) */
+            const double v = (ls + b->spd) / 2.0;
+            tsegs[n_tsegs].c = v >= SPEEDO_VMAX ? 255 : (int)(v * 255.0 / SPEEDO_VMAX + 0.5);
+        }
         n_tsegs++;
-        lx = bx; ly = by;
+        lx = bx; ly = by; ls = b->spd;
     }
     return 1;
 }
@@ -1664,12 +1735,17 @@ static void trail_draw(const int32_t *camera) {
     t0 = qpc();
     if (trail_mask_n != sw * sh || trail_rows != sh) {
         int Y;
-        free(trail_mask); free(trail_lo); free(trail_hi);
+        free(trail_mask); free(trail_cmask); free(trail_lo); free(trail_hi);
         trail_mask = (uint8_t *)calloc((size_t)sw * sh, 1);
+        trail_cmask = (uint8_t *)calloc((size_t)sw * sh, 1);
         trail_lo = (int16_t *)malloc(sizeof(int16_t) * (size_t)sh);
         trail_hi = (int16_t *)malloc(sizeof(int16_t) * (size_t)sh);
         trail_key.valid = 0;
-        if (!trail_mask || !trail_lo || !trail_hi) { free(trail_mask); free(trail_lo); free(trail_hi); trail_mask = NULL; trail_lo = trail_hi = NULL; trail_mask_n = trail_rows = 0; return; }
+        if (!trail_mask || !trail_cmask || !trail_lo || !trail_hi) {
+            free(trail_mask); free(trail_cmask); free(trail_lo); free(trail_hi);
+            trail_mask = trail_cmask = NULL; trail_lo = trail_hi = NULL; trail_mask_n = trail_rows = 0;
+            return;
+        }
         trail_mask_n = sw * sh; trail_rows = sh;
         for (Y = 0; Y < sh; Y++) { trail_lo[Y] = INT16_MAX; trail_hi[Y] = 0; }
     }
@@ -1719,6 +1795,16 @@ static void trail_draw(const int32_t *camera) {
             free(fresh);
         }
     }
+    if (trail_colour != trail_lut_mode || speed_from != trail_lut_from) {   /* the colours: the speedometer's, or red */
+        int k;
+        for (k = 0; k < 256; k++) {
+            if (trail_colour) {
+                const speedo_rgb c = speedo_colour(k * SPEEDO_VMAX / 255.0, speed_from);
+                trail_lut[k] = (uint32_t)(c.r * 255.0f + 0.5f) << 16 | (uint32_t)(c.g * 255.0f + 0.5f) << 8 | (uint32_t)(c.b * 255.0f + 0.5f);
+            } else trail_lut[k] = 235u << 16 | 30u << 8 | 30u;
+        }
+        trail_lut_mode = trail_colour; trail_lut_from = speed_from;
+    }
     parallel_rows(trail_blend_rows, rv.y1, rv.y2, (long)(rv.x2 - rv.x1) * (rv.y2 - rv.y1) / 4);
     t_line += qpc() - t0;
 }
@@ -1731,8 +1817,11 @@ static void trail_draw(const int32_t *camera) {
  * direction (its x against the half width, its y against the half height, so a tall open space counts for more than an
  * equally wide one). How open the point is: the average (in log) of the 8 most open directions' zooms -- below 1 it
  * is open and that is the zoom; 1 to 3 is ordinary (100%); above 3 it is tight and zooms in, (q / 3)^0.46 (about 150%
- * on a 1920x696 time trial map at 2560x1440). The points: the worm, and where it is heading (its speed x 0.5, 1, 1.5
- * and 2 s along its way, stopped short of land); the most open of them, smoothed (0.3 s), is the goal. The goal scales
+ * on a 1920x696 time trial map at 2560x1440). The ray straight down comes first while the worm falls fast (the owner,
+ * 2026-11-22: AutoZoomFallSpeed, 1000 px/s down): the zoom never goes so far in that the land below the worm would be
+ * off the screen's bottom edge (a quarter of the drop, at most 200 px, shown past it), so falling down a shaft zooms out
+ * even where the sides are close (a narrow shaft read as tight before and zoomed in). The points: the worm, and where it is heading (its speed x 0.5, 1, 1.5
+ * and 2 s along its way, stopped short of land); the most zoomed out of them, smoothed (0.3 s), is the goal. The goal scales
  * the zoom chosen with the wheel (the wheel is the base), between AutoZoomMin and AutoZoomMax, and never further out
  * than where the whole level fits the screen. It only changes once the goal is 10% away, and eases there (1 s out, 0.9 s
  * in; at most 60% a second out, 40% in): only the zoom changes, never where the camera is (the smart camera made the
@@ -1742,18 +1831,41 @@ static int auto_zoom;                   /* AutoZoom= (Ctrl + A switches it) */
 static double auto_min = 0.35;          /* AutoZoomMin=: the furthest it zooms out */
 static double auto_max = 1.5;           /* AutoZoomMax=: the furthest it zooms in */
 static double auto_factor = 1.0, auto_goal = 1.0;   /* the zoom's auto share; its goal */
-static double auto_lg, auto_want = 1.0, auto_here = 1.0, auto_speed;   /* the smoothed log of the wanted zoom (once
-                                                     auto_lg_ok); the zoom wanted last, and at the worm alone; its speed */
-static int auto_lg_ok;
+static double auto_lg, auto_want = 1.0, auto_here = 1.0, auto_below = 20.0, auto_speed;   /* the smoothed log of the
+                                                     wanted zoom (once auto_lg_ok); the zoom wanted last; how open it is
+                                                     at the worm alone, and what the ray under it wants; its speed */
+static int auto_lg_ok, auto_falling;    /* (auto_falling: the ray down counts this look) */
 static LARGE_INTEGER auto_clock, auto_evalt;
 #define AUTO_M 0.8                      /* a ray's end at 80% of the way to the screen's edge */
 #define AUTO_TIGHT 3.0                  /* how open: up to here ordinary (100%), above it tight (zoomed in) */
 #define AUTO_IN_POW 0.464               /* tight: (q / AUTO_TIGHT)^this */
+#define AUTO_DOWN 4                     /* the ray straight down (of 16, from 0 = right; y grows downwards) */
+static double auto_fall = 1000.0;       /* AutoZoomFallSpeed=: the ray down counts only while the worm falls this fast
+                                           (px/s down; the owner, 2026-11-22) */
+#define AUTO_DOWN_ROOM 200.0            /* map px shown past the floor below the worm, at most (else a quarter of the drop:
+                                           the owner, 2026-11-22: a 2000 px drop showed 500 px past the floor) */
 #define AUTO_TRACK 48
 static double auto_tx[AUTO_TRACK], auto_ty[AUTO_TRACK], auto_tt[AUTO_TRACK];   /* the worm's last places, and when */
 static int auto_tn, auto_ti;
 static int auto_phase, auto_np;         /* the look's frame (0-5); its points ahead */
-static double auto_px[4], auto_py[4], auto_acc;   /* those points; the most zoomed-out so far this look (0: none) */
+/* The speed zoom (the owner, 2026-11-22): past a speed the zoom is multiplied down, more the faster the worm goes --
+ * the strength once for every SPEED_STEP px/s over (from 800 px/s at x0.7: x0.7 at 1300 px/s, x0.49 at 1800). The speed
+ * is the auto zoom's (the turn's worm, over the last quarter second), held: it falls off over SPEED_HOLD, so a rope
+ * swing's slow top doesn't pump the zoom. On its own or with the auto zoom (then it multiplies the auto zoom's); never
+ * further out than AutoZoomMin or where the whole level fits. Its speeds, measured on the owner's replays: moving worms
+ * go about 350-400 px/s (median), above 600 px/s 6% of the time, falls and fast swings up to about 1700 px/s. */
+static int speed_zoom;                  /* SpeedZoom= */
+static double speed_from = 800.0;       /* SpeedZoomFrom=: from this speed (land pixels a second; 800: on the owner's
+                                           newest game 500 fired 4 times a minute on ordinary rope flings, 800 only
+                                           on the 5 real falls) */
+static double speed_mult = 0.7;         /* SpeedZoomStrength=: the zoom times this for every SPEED_STEP px/s over */
+static double speed_held, speed_m = 1.0;   /* the speed, held; the multiplier now */
+static double auto_vx, auto_vy;         /* the worm's velocity (over the last quarter second; auto_speed its size) */
+
+#define SPEED_STEP 500.0
+#define SPEED_HOLD 1.5                  /* s: the held speed's fall-off (its time constant) */
+static double auto_px[4], auto_py[4], auto_acc;   /* those points; the most zoomed-out zoom wanted so far this look
+                                                     (0: none) */
 
 static double eff_zoom(void) { return zoom_clamp(zoom_now * auto_factor, zoom_lo, zoom_hi); }
 static double ind_alpha(void);
@@ -1796,16 +1908,22 @@ static double auto_ray(double px, double py, double dx, double dy, double maxd) 
 }
 
 /* how open it is around (px, py) (see above): the zoom that the 8 most open of 16 directions want, on average (in
- * log); no further out than lo is looked for */
-static double auto_fit(double px, double py, double lo) {
-    double z[16], s = 0.0;
+ * log); no further out than lo is looked for. *below: the zoom the ray straight down wants on its own */
+static double auto_fit(double px, double py, double lo, double lo_down, double *below) {
+    double z[16], s = 0.0, down = 1.0;
     int k;
     for (k = 0; k < 16; k++) {
         const double ang = k * (6.283185307179586 / 16.0), dx = cos(ang), dy = sin(ang);
         const double ex = fabs(dx) > 1e-9 ? (sw / 2.0) / fabs(dx) : 1e9, ey = fabs(dy) > 1e-9 ? (sh / 2.0) / fabs(dy) : 1e9;
         const double edge = AUTO_M * (ex < ey ? ex : ey);   /* 80% of the way to the screen's edge this way, at 100% */
-        z[k] = edge / auto_ray(px, py, dx, dy, edge / lo + 2.0);   /* (the ray goes only as far as matters) */
+        const double d = auto_ray(px, py, dx, dy, edge / (k == AUTO_DOWN ? lo_down : lo) + 2.0);   /* (the ray goes only as
+                                                     far as matters; down: as far as the real zoom's floor) */
+        z[k] = edge / d;
+        if (k == AUTO_DOWN) down = d;
     }
+    /* the ray down on its own: the screen's bottom edge a little past the floor (a quarter of the drop, at most
+     * AUTO_DOWN_ROOM px) */
+    *below = (sh / 2.0) / (down + (down * 0.25 < AUTO_DOWN_ROOM ? down * 0.25 : AUTO_DOWN_ROOM));
     qsort(z, 16, sizeof(double), dcmp);
     for (k = 0; k < 8; k++) s += log(z[k] < lo ? lo : z[k] > 20.0 ? 20.0 : z[k]);
     return exp(s / 8.0);
@@ -1814,10 +1932,26 @@ static double auto_fit(double px, double py, double lo) {
 /* how open it is -> the zoom: open (below 1) as it is, ordinary (1 to AUTO_TIGHT) 100%, tight zoomed in */
 static double auto_map(double q) { return q < 1.0 ? q : q <= AUTO_TIGHT ? 1.0 : pow(q / AUTO_TIGHT, AUTO_IN_POW); }
 
+/* the zoom (the auto share) a point wants: as open as it is (auto_map); at the worm itself (under) also never so far in
+ * that the land straight below it would be off the screen's bottom edge (a quarter of the drop, at most AUTO_DOWN_ROOM
+ * px, shown past it) -- the ray under the worm
+ * comes first (the owner, 2026-11-22: falling down a shaft, or high up with nothing below, zooms out even where the
+ * sides are close; zoomed in, it eases off as the ground drops away). That ray's zoom is a real zoom (the screen at
+ * 100%), so it is taken as a share of the wheel's zoom. Only at the worm: the points ahead lie on a straight line
+ * along its speed, high above where a jump goes, and their rays down pumped the zoom in and out on the owner's replays.
+ * *q, *below (may be NULL): how open it is, and the zoom the ray down wants */
+static double auto_point(double px, double py, double lo, int under, double *q, double *below) {
+    double b, o = auto_fit(px, py, lo, under && zoom_now < 1.0 ? lo * zoom_now : lo, &b), w = auto_map(o);
+    if (under && b / zoom_now < w) w = b / zoom_now;
+    if (q) *q = o;
+    if (below) *below = b;
+    return w;
+}
+
 static void auto_zoom_frame(void) {
     LARGE_INTEGER now;
     double dt, step, fl = auto_min, ce = auto_max < 1.0 ? 1.0 : auto_max;   /* the auto share's least and most */
-    int have, inside;
+    int have, inside, track;
     QueryPerformanceCounter(&now);
     dt = auto_clock.QuadPart ? (double)(now.QuadPart - auto_clock.QuadPart) / clock_freq.QuadPart : 0.0;
     auto_clock = now;
@@ -1828,39 +1962,86 @@ static void auto_zoom_frame(void) {
         if (whole > fl) fl = whole;
     }
     if (fl > 1.0) fl = 1.0;
-    have = auto_zoom && land_ok && tile_grid && turn_worm_ok && zoom_now > 0.0 && (fl < 0.999 || ce > 1.001);
-    inside = have && turn_wx >= 0.0 && turn_wy >= 0.0 && turn_wx < land.w && turn_wy < land.h;
-    if (have && !inside) {                          /* the worm off the level (above an island map's top, or before it
-                                                       is placed, when WA keeps it far off the map): the zoom held */
-        auto_tn = 0;
-        auto_phase = 0;
-        auto_acc = 0.0;
-    } else if (have) {
+    have = (auto_zoom || speed_zoom) && land_ok && tile_grid && turn_worm_ok && zoom_now > 0.0 &&
+           (fl < 0.999 || (auto_zoom && ce > 1.001));   /* (the speed zoom alone only zooms out) */
+    /* (the worm off the level -- above an island map's top, or before it is placed, when WA keeps it far off the map --
+     * is not inside) */
+    inside = turn_worm_ok && land_ok && turn_wx >= 0.0 && turn_wy >= 0.0 && turn_wx < land.w && turn_wy < land.h;
+    /* the track (and the speedometer) in a looser box: high above the level is fine; not WA's far-off place for a worm
+     * not placed yet (y -10000) */
+    track = turn_worm_ok && land_ok && turn_wx > -4000.0 && turn_wx < land.w + 4000.0 && turn_wy > -8000.0 &&
+            turn_wy < land.h + 4000.0;
+    if ((have || speedo) && track) {        /* the worm's track, and its speed (the speedometer's too) */
         const double ts = (double)now.QuadPart / clock_freq.QuadPart;
         const int last = (auto_ti + AUTO_TRACK - 1) % AUTO_TRACK;
-        if (auto_tn && hypot(turn_wx - auto_tx[last], turn_wy - auto_ty[last]) > 300.0) auto_tn = 0;   /* (a teleport, or
-                                                                                          the next worm: a new track) */
+        int k, j = -1;
+        if (turn_key != track_key || trail_turn != track_turn) {   /* another worm or turn: a new track, from rest */
+            track_key = turn_key; track_turn = trail_turn;
+            auto_tn = 0;
+            speed_held = 0.0;
+            spd_disp = 0.0;
+            spd_lx = turn_wx; spd_ly = turn_wy; spd_moved = 0.0;
+        }
+        if (auto_tn && hypot(turn_wx - auto_tx[last], turn_wy - auto_ty[last]) > 300.0) auto_tn = 0;   /* (a teleport) */
         auto_tx[auto_ti] = turn_wx; auto_ty[auto_ti] = turn_wy; auto_tt[auto_ti] = ts;
         auto_ti = (auto_ti + 1) % AUTO_TRACK;
         if (auto_tn < AUTO_TRACK) auto_tn++;
-        /* one look every 6 frames, shared out so no frame casts more than one point's 16 rays: frame 0 the speed and
-         * the worm's own point, frames 1-4 the points ahead, frame 5 the goal */
+        for (k = 1; k < auto_tn; k++) {             /* the speed: over the last quarter second */
+            const int s = (auto_ti + AUTO_TRACK - 1 - k) % AUTO_TRACK;
+            if (ts - auto_tt[s] > 0.25) break;
+            j = s;
+        }
+        auto_vx = auto_vy = 0.0;
+        if (j >= 0 && ts - auto_tt[j] > 0.05) {
+            auto_vx = (turn_wx - auto_tx[j]) / (ts - auto_tt[j]);
+            auto_vy = (turn_wy - auto_ty[j]) / (ts - auto_tt[j]);
+        }
+        auto_speed = hypot(auto_vx, auto_vy);
+        spd_now = turn_gv > 1.0 ? turn_gv : auto_speed;
+        spd_disp = spd_disp + (spd_now - spd_disp) * (1.0 - exp(-dt / 0.06));
+        if (trail_turn != spd_turn) { spd_turn = trail_turn; spd_best = spd_dist = spd_time = 0.0; }
+        if (spd_now > spd_best) spd_best = spd_now;
+        {   /* the average: the way it went over the time it was moving (a frozen game -- a paused replay, an online
+             * game waiting -- adds nothing: nothing moves) */
+            const double step_ = hypot(turn_wx - spd_lx, turn_wy - spd_ly);
+            const int moved = step_ > 0.0 && step_ < 300.0;
+            if (moved) spd_moved = ts;
+            if (spd_moved > 0.0 && ts - spd_moved < 0.1 && spd_now > 30.0) {   /* (the way and the time on the same
+                                                                                   frames) */
+                spd_time += dt;
+                if (moved) spd_dist += step_;
+            }
+            spd_lx = turn_wx; spd_ly = turn_wy;
+            if (test_mode && frames % 120 == 0)   /* (test: the game's speed against the one from the worm's path) */
+                say("test: speed: the game's %.0f, from the path %.0f, shown %.0f; the turn's best %.0f, average %.0f (%.0f px in %.1f s)",
+                    turn_gv, auto_speed, spd_disp, spd_best, spd_time > 0.5 ? spd_dist / spd_time : 0.0, spd_dist, spd_time);
+        }
+    } else {
+        spd_now = spd_disp = 0.0;
+        auto_tn = 0;
+        auto_speed = auto_vx = auto_vy = 0.0;
+    }
+    if (have && !inside) {                          /* the zoom held */
+        auto_phase = 0;
+        auto_acc = 0.0;
+    } else if (have) {
+        /* one look every 6 frames, shared out so no frame casts more than one point's 16 rays: frame 0 the worm's own
+         * point, frames 1-4 the points ahead, frame 5 the goal */
         if (auto_phase == 0) {
-            double vx = 0.0, vy = 0.0;
-            int k, j = -1;
-            for (k = 1; k < auto_tn; k++) {         /* the speed: over the last quarter second */
-                const int s = (auto_ti + AUTO_TRACK - 1 - k) % AUTO_TRACK;
-                if (ts - auto_tt[s] > 0.25) break;
-                j = s;
-            }
-            if (j >= 0 && ts - auto_tt[j] > 0.05) {
-                vx = (turn_wx - auto_tx[j]) / (ts - auto_tt[j]);
-                vy = (turn_wy - auto_ty[j]) / (ts - auto_tt[j]);
-            }
-            auto_speed = hypot(vx, vy);
-            auto_acc = auto_here = auto_fit(turn_wx, turn_wy, fl);
+            const double vx = auto_vx, vy = auto_vy;
+            int k;
             auto_np = 0;
-            if (auto_speed > 80.0) {                /* where it is heading */
+            if (!auto_zoom) {                       /* (the speed zoom alone: no rays) */
+                auto_acc = 1.0;
+                auto_here = 1.0;
+                auto_below = 20.0;
+            } else {                        /* (the ray down: only while the worm falls fast -- the game's speed, else
+                                               its path's) */
+                const double down_v = turn_gv > 1.0 ? turn_gvy : auto_vy;
+                auto_falling = down_v >= auto_fall;
+                auto_acc = auto_point(turn_wx, turn_wy, fl, auto_falling, &auto_here, &auto_below);
+            }
+            if (auto_zoom && auto_speed > 80.0) {   /* where it is heading */
                 static const double look[4] = { 0.5, 1.0, 1.5, 2.0 };
                 const double ux = vx / auto_speed, uy = vy / auto_speed;
                 const double free_ = auto_ray(turn_wx, turn_wy, ux, uy, auto_speed * 2.0 + 4.0);
@@ -1876,17 +2057,22 @@ static void auto_zoom_frame(void) {
             }
         } else if (auto_phase <= 4) {
             if (auto_phase - 1 < auto_np) {
-                const double q = auto_fit(auto_px[auto_phase - 1], auto_py[auto_phase - 1], fl);
-                if (q < auto_acc) auto_acc = q;
+                const double w = auto_point(auto_px[auto_phase - 1], auto_py[auto_phase - 1], fl, 0, NULL, NULL);
+                if (w < auto_acc) auto_acc = w;
             }
         } else if (auto_acc > 0.0) {
-            double want = auto_map(auto_acc), g, edt;
-            if (want > ce) want = ce;
-            if (want < fl) want = fl;
-            auto_want = want;
+            double want = auto_acc, g, edt;
             edt = auto_evalt.QuadPart ? (double)(now.QuadPart - auto_evalt.QuadPart) / clock_freq.QuadPart : 0.1;
             auto_evalt = now;
             if (edt > 0.5) edt = 0.5;
+            /* the speed zoom: the speed held (it falls off over SPEED_HOLD), and past speed_from the strength once for
+             * every SPEED_STEP px/s over */
+            speed_held = spd_now > speed_held ? spd_now : speed_held * exp(-edt / SPEED_HOLD);
+            speed_m = speed_zoom && speed_held > speed_from ? pow(speed_mult, (speed_held - speed_from) / SPEED_STEP) : 1.0;
+            want *= speed_m;
+            if (want > ce) want = ce;
+            if (want < fl) want = fl;
+            auto_want = want;
             auto_lg = auto_lg_ok ? auto_lg + (log(want) - auto_lg) * (1.0 - exp(-edt / 0.3)) : log(want);
             auto_lg_ok = 1;
             g = exp(auto_lg);                       /* (the auto share of the zoom: it scales the wheel's) */
@@ -1906,12 +2092,13 @@ static void auto_zoom_frame(void) {
             if (n % 600 == 0) say("test: auto zoom: %.3f ms a frame on average, %.3f ms at most (%u frames)", sum / n, worst, n);
         }
         auto_phase = (auto_phase + 1) % 6;
-    } else {
+    } else {                                        /* (the track is the speedometer's too: kept above) */
         auto_goal = 1.0;
         auto_lg_ok = 0;
-        auto_tn = 0;
         auto_phase = 0;
         auto_acc = 0.0;
+        speed_held = 0.0;
+        speed_m = 1.0;
     }
     if (auto_goal > ce) auto_goal = ce;
     if (auto_goal < fl) auto_goal = fl;
@@ -1927,10 +2114,12 @@ static void auto_zoom_frame(void) {
         if (step != 0.0 && last_pct >= 0 && pct != last_pct) ind_changed = GetTickCount();
         last_pct = pct;
     }
-    if (test_mode && frames % 50 == 0 && auto_zoom)
-        say("test: auto zoom: wants %.0f%% (how open at the worm %.2f, speed %.0f), goal %.0f%%, now %.0f%%, zoom number %.2f",
-            auto_want * 100.0, auto_here, auto_speed, zoom_now * auto_goal * 100.0, eff_zoom() * 100.0, ind_alpha());
-    if (test_mode && auto_zoom && GetEnvironmentVariableA("WKMAPZOOM_TEST_TRACE", NULL, 0) > 0) {   /* (test: the worm's
+    if (test_mode && frames % 50 == 0 && (auto_zoom || speed_zoom))
+        say("test: auto zoom: wants %.0f%% (how open at the worm %.2f, the ray down %.0f%%%s, speed %.0f, held %.0f: x%.2f), "
+            "goal %.0f%%, now %.0f%%, zoom number %.2f", auto_want * 100.0, auto_here, auto_below * 100.0,
+            auto_falling ? " (falling: counts)" : "", auto_speed, speed_held, speed_m, zoom_now * auto_goal * 100.0,
+            eff_zoom() * 100.0, ind_alpha());
+    if (test_mode && (auto_zoom || speed_zoom) && GetEnvironmentVariableA("WKMAPZOOM_TEST_TRACE", NULL, 0) > 0) {   /* (test: the worm's
         path each frame and the land, for working the auto zoom out away from WA) */
         static FILE *tf;
         static int land_dumps;
@@ -1967,6 +2156,7 @@ static void palette_tables(void *display) {
     int k;
     if (white_index >= 0 && !memcmp(pal, pal_seen, sizeof(pal_seen))) return;
     memcpy(pal_seen, pal, sizeof(pal_seen));
+    lut12_ok = 0;                           /* (the speedometer's table: made again when used) */
     white_index = pal_nearest(pal, 255, 255, 255);
     for (k = 0; k < 256; k++)
         dark_lut[k] = (uint8_t)pal_nearest(pal, pal[4 * k] * 30 / 100, pal[4 * k + 1] * 30 / 100, pal[4 * k + 2] * 30 / 100);
@@ -1987,18 +2177,140 @@ static double ind_alpha(void) {
     if (ind_mode == IND_OFF) return 0.0;
     if (zoom_now != zoom_goal) return 1.0;
     a = age < 1500 ? 1.0 : age < 2000 ? 1.0 - (age - 1500) / 500.0 : 0.0;
-    if (ind_mode == IND_ALWAYS && fabs(zoom_goal * auto_goal - 1.0) > 0.005 && a < 0.6) a = 0.6;   /* (the auto zoom's
-                                                                                                   share counts too) */
+    if (ind_mode == IND_ALWAYS && fabs(zoom_goal * auto_goal - zoom_clamp(zoom_default, zoom_lo, zoom_hi)) > 0.005 && a < 0.6)
+        a = 0.6;                            /* (while not at the default zoom; the auto zoom's share counts too) */
     return a;
 }
 
 static int pow2(int v) { int p = 16; while (p < v) p <<= 1; return p; }
 
-static void draw_readout(void *display) {
+/* a badge picture (badge_paint_text's: its box a see-through dark, its text white) into WA's frame at (x0, y0), faded
+ * to level / 16 by an ordered dither (WA's frame has no see-through colours); palette_tables first */
+static void blit_badge(const uint32_t *img, int tw, int bw, int bh, int x0, int y0, int level) {
     static const uint8_t bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
     uint8_t *frame = *(uint8_t **)VA(FRAME_PTR_VA);   /* (the renderer's frame: see queue_hook) */
+    const int stride = *(int32_t *)VA(FRAME_W_VA), fw = stride, fh = *(int32_t *)VA(FRAME_H_VA);
+    int x, y;
+    if (!frame || !img) return;
+    for (y = 0; y < bh; y++) {
+        uint8_t *row;
+        if (y0 + y < 0 || y0 + y >= fh) continue;
+        row = frame + (size_t)(y0 + y) * stride;
+        for (x = 0; x < bw; x++) {
+            uint32_t c = img[y * tw + x], r, gg, b, mx;
+            uint8_t *px;
+            if (!(c >> 24) || x0 + x < 0 || x0 + x >= fw || bayer[(x & 3) + (y & 3) * 4] >= level) continue;
+            r = (c >> 16) & 0xff; gg = (c >> 8) & 0xff; b = c & 0xff;
+            mx = r > gg ? (r > b ? r : b) : (gg > b ? gg : b);
+            px = row + x0 + x;
+            *px = mx > 128 ? (uint8_t)white_index : dark_lut[*px];
+        }
+    }
+}
+
+/* the speedometer (speedo.h): the dial or the number for the turn's worm, in the screen's bottom right corner (above
+ * WA's wind bar, and above the zoom number when that is there too) or just above the worm's name (WA draws the name and
+ * the energy above the worm, zoomed with the map: the picture's bottom SPEEDO_UP map pixels above the worm's middle, as
+ * shown, and 2 screen pixels more); made again when what it shows changes; not over WA's Esc menu. In true colour it is
+ * blended into the true-colour frame (compose: see-through, smooth); otherwise put into WA's frame in its palette. */
+#define SPEEDO_UP 44.0
+static speedo_dial spd_dial;
+static speedo_number spd_numpic;
+static uint32_t *spd_img;
+static int spd_cap, spd_w, spd_h, spd_key[7] = {-1};
+static double spd_digits, spd_avg;      /* the digits' speed: taken 10 times a second (as digital gauges do); the
+                                           average shown, in tens, twice a second */
+static DWORD spd_digits_tick, spd_avg_tick;
+static int speedo_will(void *runtime) {   /* (before WA draws the frame) */
+    return speedo && worms_ok && turn_worm_ok && auto_tn && !(runtime && *(uint32_t *)((char *)runtime + 0x434) == 1);
+}
+static void draw_speedo(void *display) {
+    uint8_t *frame = *(uint8_t **)VA(FRAME_PTR_VA);
+    const int stride = *(int32_t *)VA(FRAME_W_VA), fw = stride, fh = *(int32_t *)VA(FRAME_H_VA);
+    const double avg = spd_time > 0.5 ? (spd_dist / spd_time < spd_best ? spd_dist / spd_time : spd_best) : 0.0;
+    const int dial = speedo == 1, size = dial ? (fh * 120 / 1080 < 110 ? 110 : fh * 120 / 1080) : (fh * 34 / 1080 < 22 ? 22 : fh * 34 / 1080);
+    int w, h, x0, y0, x, y, key[7];
+    ov_on = 0;
+    if (!spd_will || !frame || fw < 64 || fh < 64) return;
+    if (dial) { w = h = size; } else speedo_number_size(size, &w, &h);
+    if (GetTickCount() - spd_digits_tick >= 100) { spd_digits = spd_disp; spd_digits_tick = GetTickCount(); }
+    if (GetTickCount() - spd_avg_tick >= 500 || (avg > 0.0) != (spd_avg > 0.0)) {
+        spd_avg = avg > 0.0 ? floor(avg / 10.0 + 0.5) * 10.0 : 0.0;
+        spd_avg_tick = GetTickCount();
+    }
+    key[0] = (int)(spd_digits + 0.5);
+    key[1] = dial ? (int)ceil(spd_disp / (SPEEDO_VMAX / SPEEDO_SEGS)) : 0;   /* (the ring: how many segments lit) */
+    key[2] = dial ? (int)(spd_best / (SPEEDO_VMAX / SPEEDO_SEGS)) : 0;
+    key[3] = dial ? (int)spd_avg : 0;
+    key[4] = speedo; key[5] = size; key[6] = (int)speed_from;
+    if (memcmp(key, spd_key, sizeof(key)) || !spd_img) {   /* the picture, made again when what it shows changes */
+        const LONGLONG t0 = test_mode ? qpc() : 0;
+        if (w * h > spd_cap) {
+            free(spd_img);
+            spd_img = (uint32_t *)malloc((size_t)w * h * 4);
+            spd_cap = spd_img ? w * h : 0;
+            if (!spd_img) return;
+        }
+        if (dial ? !speedo_dial_paint(&spd_dial, size, speed_from, spd_disp, key[0], spd_best, spd_avg, spd_img, w * 4)
+                 : !speedo_number_paint(&spd_numpic, size, key[0], speed_from, spd_img, w * 4)) { spd_key[0] = -1; return; }
+        memcpy(spd_key, key, sizeof(key));
+        spd_w = w; spd_h = h;
+        if (test_mode) {                    /* (test: what a repaint costs) */
+            static double sum, worst;
+            static unsigned n;
+            const double ms = (double)(qpc() - t0) * 1000.0 / clock_freq.QuadPart;
+            sum += ms; n++;
+            if (ms > worst) worst = ms;
+            if (n % 300 == 0) say("test: speedometer: %u repaints, %.3f ms each on average, %.3f ms at most (%d px)", n, sum / n, worst, size);
+        }
+    }
+    if (speedo_place == 1) {                /* above the worm's name */
+        if (!spd_cam) return;
+        x0 = (int)floor(spd_ox + (turn_wx - spd_cx) * spd_z - w / 2.0 + 0.5);
+        y0 = (int)floor(spd_oy + (turn_wy - SPEEDO_UP - spd_cy) * spd_z + 0.5) - 2 - h;
+    } else {                                /* the bottom right corner */
+        x0 = fw - w - fh * 14 / 1080;
+        y0 = fh - h - 30 - fh * 8 / 1080;   /* (WA's wind bar: about 30 px at the bottom, at any size) */
+        if (ind_place == PLACE_BOTTOM_RIGHT && (ind_mode != IND_OFF || message_on())) {   /* (above the zoom number) */
+            int f, bw, bh;
+            badge_size(fh, &f, &bw, &bh);
+            y0 = fh - bh - fh * 120 / 1080 - 8 - h;
+        }
+    }
+    if (x0 + w <= 0 || x0 >= fw || y0 + h <= 0 || y0 >= fh) return;
+    if (tc.on && tc_ok && present_live()) { /* the true-colour frame: blended in there (compose) */
+        ov_img = spd_img; ov_x0 = x0; ov_y0 = y0; ov_w = w; ov_h = h; ov_on = 1;
+        return;
+    }
+    palette_tables(display);                /* WA's own frame: its palette's nearest colours; the shadow darkens */
+    if (!lut12_ok) {
+        const uint8_t *pal = (const uint8_t *)display + D_PALETTE;
+        int k;
+        for (k = 0; k < 4096; k++) lut12[k] = (uint8_t)pal_nearest(pal, (k >> 8) * 17, ((k >> 4) & 15) * 17, (k & 15) * 17);
+        lut12_ok = 1;
+    }
+    for (y = 0; y < h; y++) {
+        uint8_t *row;
+        if (y0 + y < 0 || y0 + y >= fh) continue;
+        row = frame + (size_t)(y0 + y) * stride;
+        for (x = 0; x < w; x++) {
+            const uint32_t c = spd_img[y * w + x], a = c >> 24;
+            uint32_t r, g, b;
+            if (a < 100 || x0 + x < 0 || x0 + x >= fw) continue;
+            r = ((c >> 16) & 0xff) * 255 / a; g = ((c >> 8) & 0xff) * 255 / a; b = (c & 0xff) * 255 / a;
+            if (r > 255) r = 255;
+            if (g > 255) g = 255;
+            if (b > 255) b = 255;
+            if (r < 40 && g < 40 && b < 40) row[x0 + x] = dark_lut[row[x0 + x]];
+            else if (a >= 150) row[x0 + x] = lut12[(r >> 4) << 8 | (g >> 4) << 4 | b >> 4];
+        }
+    }
+}
+
+static void draw_readout(void *display) {
+    uint8_t *frame = *(uint8_t **)VA(FRAME_PTR_VA);   /* (the renderer's frame: see queue_hook) */
     int stride = *(int32_t *)VA(FRAME_W_VA), fw = stride, fh = *(int32_t *)VA(FRAME_H_VA);
-    int pct = (int)floor(eff_zoom() * 100.0 + 0.5), m, x0, y0, x, y, level;
+    int pct = (int)floor(eff_zoom() * 100.0 + 0.5), m, x0, y0, level;
     double a = ind_alpha();
     char text[48];
     if (a <= 0.02 || !frame || fw < 64 || fh < 64) return;
@@ -2023,21 +2335,8 @@ static void draw_readout(void *display) {
     x0 = ind_place == PLACE_TOP_LEFT || ind_place == PLACE_BOTTOM_LEFT ? m
        : ind_place == PLACE_TOP || ind_place == PLACE_BOTTOM ? (fw - ind_bw) / 2 : fw - ind_bw - m;
     y0 = ind_place >= PLACE_BOTTOM_RIGHT ? fh - ind_bh - fh * 120 / 1080 : (fh * 110 / 1080 > 80 ? fh * 110 / 1080 : 80);
-    level = (int)(a * 16.0 + 0.5);          /* fading: an ordered dither (WA's frame has no see-through colours) */
-    for (y = 0; y < ind_bh; y++) {
-        uint8_t *row;
-        if (y0 + y < 0 || y0 + y >= fh) continue;
-        row = frame + (size_t)(y0 + y) * stride;
-        for (x = 0; x < ind_bw; x++) {
-            uint32_t c = ind_img[y * ind_tw + x], r, gg, b, mx;
-            uint8_t *px;
-            if (!(c >> 24) || x0 + x < 0 || x0 + x >= fw || bayer[(x & 3) + (y & 3) * 4] >= level) continue;
-            r = (c >> 16) & 0xff; gg = (c >> 8) & 0xff; b = c & 0xff;
-            mx = r > gg ? (r > b ? r : b) : (gg > b ? gg : b);
-            px = row + x0 + x;
-            *px = mx > 128 ? (uint8_t)white_index : dark_lut[*px];
-        }
-    }
+    level = (int)(a * 16.0 + 0.5);          /* (fading) */
+    blit_badge(ind_img, ind_tw, ind_bw, ind_bh, x0, y0, level);
 }
 
 /* ---- test mode: WA's frame as a BMP ------------------------------------------------------------------------------ */
@@ -2108,6 +2407,36 @@ static void test_script(void *display) {
         snprintf(name, sizeof(name), "auto-%02u", frames / 600);
         dump_frame(display, name);
     }
+    {   /* frames asked for by number (WKMAPZOOM_TEST_DUMPAT=700,1200): saved as at-<frame>, with where the turn's worm is
+         * on the screen */
+        static char at[128];
+        static int read_at;
+        char *q, name[32];
+        if (!read_at) { read_at = 1; if (!GetEnvironmentVariableA("WKMAPZOOM_TEST_DUMPAT", at, sizeof(at))) at[0] = 0; }
+        for (q = at; *q; ) {
+            const unsigned f = (unsigned)strtoul(q, &q, 10);
+            if (f && f == frames) {
+                snprintf(name, sizeof(name), "at-%u", f);
+                say("test: frame %u: the turn's worm at %.0f,%.0f, on the screen at %.0f,%.0f (zoom %.2f)", f, turn_wx, turn_wy,
+                    spd_ox + (turn_wx - spd_cx) * spd_z, spd_oy + (turn_wy - spd_cy) * spd_z, spd_z);
+                dump_frame(display, name);
+            }
+            while (*q == ',' || *q == ' ') q++;
+            if (!f) break;
+        }
+    }
+    {   /* the speedometer at the first fast moments (over 700 px/s, a few seconds apart) */
+        static int fast_dumps;
+        static unsigned fast_at;
+        if (speedo && spd_now > 700.0 && fast_dumps < 3 && (!fast_at || frames - fast_at > 300)) {
+            char name[32];
+            fast_at = frames;
+            snprintf(name, sizeof(name), "speedo-fast-%d", ++fast_dumps);
+            say("test: the speedometer at %.0f px/s (best %.0f, the turn's average %.0f)", spd_now, spd_best,
+                spd_time > 0.5 ? spd_dist / spd_time : 0.0);
+            dump_frame(display, name);
+        }
+    }
     if (test_zoom > 0.0) return;
     switch (frames) {
     case 190: dump_frame(display, "1-zoom100"); set_goal(zoom_lo, "test script"); break;
@@ -2141,7 +2470,16 @@ static void test_script(void *display) {
         if (test_esc) { dump_frame(display, "9-escmenu"); if (test_esc == 2) escmenu_test_options(); else escmenu_test_list(); }
         break;
     case 790: if (test_esc) dump_frame(display, test_esc == 2 ? "10-escmenu-options" : "10-escmenu-list"); break;
-    case 800: if (test_esc == 2) { escmenu_test_click(2); escmenu_test_click(3); } break;   /* (Auto zoom in to, Red line) */
+    case 800:
+        if (test_esc == 2) {
+            escmenu_test_click(OPT_DEFAULT); escmenu_test_click(OPT_AUTO_IN); escmenu_test_click(OPT_LINE);
+            escmenu_test_click(OPT_SPEED_STRENGTH);
+            if (test_switch_w) set_goal(0.5, "test script");   /* (the switch test's zoom kept) */
+        }
+        break;
+    case 815: if (test_esc == 2) escmenu_test_more(); break;   /* (the options' pages: the second, then the third) */
+    case 822: if (test_esc == 2) dump_frame(display, "11a-escmenu-options-page2"); break;
+    case 825: if (test_esc == 2) escmenu_test_more(); break;
     case 830: if (test_esc == 2) dump_frame(display, "11-escmenu-options-clicked"); break;
     case 840: if (test_switch_w) dump_frame(display, "8-switched-zoom50"); break;
     case 900: dump_frame(display, "7-zoom100"); break;
@@ -2174,12 +2512,13 @@ static void __fastcall hook_render(void *runtime) {
     if (display && (uintptr_t)VTBL(display) == VA(DISPLAY_VTABLE_VA) && fit_size(FIELD(display, D_W), FIELD(display, D_H))) {
         const int land_changed = land_check(display);
         const DWORD gap = GetTickCount() - live_tick;   /* (since the last game frame: the lobby between games) */
-        if (world != last_world || land_changed == 2 || (land_changed && gap > 1500)) {   /* a new game: 100% (also when
-                                                           WA put it where the last one was: other land after a pause) */
+        if (world != last_world || land_changed == 2 || (land_changed && gap > 1500)) {   /* a new game: the default zoom
+                                                           (also when WA put it where the last one was: other land after a
+                                                           pause) */
             if (world == last_world) say("a new game in the last one's place (the land %s after %lu ms without game frames)",
                                          land_changed == 2 ? "has other sizes" : "is made of other tiles", (unsigned long)gap);
             last_world = world;
-            zoom_now = zoom_goal = 1.0;
+            zoom_now = zoom_goal = zoom_clamp(zoom_default, zoom_lo, zoom_hi);
             frames = 0;
             logged_split = 0;
             clock_last.QuadPart = 0;
@@ -2189,10 +2528,11 @@ static void __fastcall hook_render(void *runtime) {
             if (test_mode && test_zoom > 0.0) zoom_now = zoom_goal = zoom_clamp(test_zoom, zoom_lo, zoom_hi);
             auto_factor = auto_goal = 1.0;
             auto_lg_ok = 0;
+            spd_turn = -1; spd_best = spd_dist = spd_time = 0.0; track_key = track_turn = -1;
             auto_tn = 0;
             auto_phase = 0;
             auto_acc = 0.0;
-            say("a new game (world %p)", world);
+            say("a new game (world %p), zoom %.0f%%", world, zoom_goal * 100.0);
         } else if (land_changed) {          /* the same game, its land made of other tile objects: copied again */
             say("land: WA's tiles are other objects now (mid-game): the land copied again");
             land_free();
@@ -2208,9 +2548,12 @@ static void __fastcall hook_render(void *runtime) {
         live_tick = GetTickCount();
     }
     if (esc_menu || present_ok) escmenu_frame(runtime);
+    spd_cam = 0;
+    spd_will = frame_display && speedo_will(runtime);
     original_render(runtime);
     if (frame_display) {
         frames++;
+        draw_speedo(display);
         draw_readout(display);
         if (tc.on && tc_ok) present_ready();
         if (test_mode) test_script(display);   /* (the frame as shown: with the readout) */
@@ -2236,18 +2579,33 @@ static void set_auto_zoom(int on, const char *why) {
     save_setting("AutoZoom", on ? "1" : "0");
 }
 
-enum { OPT_AUTO, OPT_AUTO_OUT, OPT_AUTO_IN, OPT_LINE, OPT_NUMBER, OPT_COUNT };   /* (WA's Esc menu is 256 px tall:
-                                                                                     room for about five) */
+static const double opt_defaults[] = { 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.25, 1.5, 2.0 };   /* Default zoom */
 static const double opt_outs[] = { 0.25, 0.35, 0.5, 0.7, 1.0 };       /* Auto zoom out to */
 static const double opt_ins[] = { 1.0, 1.25, 1.5, 2.0, 2.5, 3.0 };    /* Auto zoom in to */
+static const double opt_froms[] = { 400.0, 500.0, 600.0, 700.0, 800.0, 1000.0, 1200.0 };   /* Speed zoom from */
+static const double opt_strengths[] = { 0.9, 0.8, 0.7, 0.6, 0.5 };    /* Speed zoom strength (each click stronger) */
 
-static int opt_count(void) { return worms_ok ? OPT_COUNT : 1; }
+static int opt_count(void) { return worms_ok ? OPT_COUNT : 2; }
 
-/* (without the worms' hooks: only the zoom number, as the first row) */
-static int opt_which(int i) { return worms_ok ? i : OPT_NUMBER; }
+/* (without the worms' hooks: only the default zoom and the zoom number) */
+static int opt_which(int i) { return worms_ok ? i : i == 0 ? OPT_DEFAULT : OPT_NUMBER; }
+
+/* the pages' groups (escmenu.c pages them when WA's menu has no room for all): general, the auto zoom, speed */
+static int opt_group(int i) {
+    const int o = opt_which(i);
+    return o >= OPT_SPEEDO ? 2 : o >= OPT_AUTO ? 1 : 0;
+}
+
+static double default_zoom_now(void) { return zoom_clamp(zoom_default, zoom_lo, zoom_hi); }   /* (the one games start at) */
 
 static void opt_label(int i, char *out, size_t n) {
     switch (opt_which(i)) {
+    case OPT_DEFAULT: snprintf(out, n, "Default zoom: %.0f%%", default_zoom_now() * 100.0); break;
+    case OPT_SPEEDO: snprintf(out, n, "Speedometer: %s", speedo == 1 ? "Dial" : speedo == 2 ? "Number" : "Off"); break;
+    case OPT_SPEEDO_PLACE: snprintf(out, n, "Speedometer place: %s", speedo_place ? "Above the worm" : "Bottom right"); break;
+    case OPT_SPEED: snprintf(out, n, "Speed zoom: %s", speed_zoom ? "On" : "Off"); break;
+    case OPT_SPEED_FROM: snprintf(out, n, "Speed zoom from: %.0f px/s", speed_from); break;
+    case OPT_SPEED_STRENGTH: snprintf(out, n, "Speed zoom strength: x%.2g per %.0f px/s", speed_mult, SPEED_STEP); break;
     case OPT_AUTO: snprintf(out, n, "Auto zoom: %s", auto_zoom ? "On" : "Off"); break;
     case OPT_AUTO_OUT:
         if (auto_min >= 0.999) snprintf(out, n, "Auto zoom out to: never");
@@ -2258,8 +2616,9 @@ static void opt_label(int i, char *out, size_t n) {
         else snprintf(out, n, "Auto zoom in to: %.0f%%", auto_max * 100.0);
         break;
     case OPT_LINE:
-        snprintf(out, n, "Red line: %s%s", !trail_on ? "Off" : trail_all ? "Whole game" : "Last turn", trail_on && trail_keep ? ", stays" : "");
+        snprintf(out, n, "Movement line: %s%s", !trail_on ? "Off" : trail_all ? "Whole game" : "Last turn", trail_on && trail_keep ? ", stays" : "");
         break;
+    case OPT_LINE_COLOUR: snprintf(out, n, "Movement line colour: %s", trail_colour ? "Speed" : "Red"); break;
     default:
         snprintf(out, n, "Zoom number: %s", ind_mode == IND_OFF ? "Off" : ind_mode == IND_ALWAYS ? "Always" : "While zooming");
         break;
@@ -2280,6 +2639,43 @@ static double opt_next(const double *list, int n, double v, double lo, double hi
 static void opt_click(int i) {
     char v[32];
     switch (opt_which(i)) {
+    case OPT_DEFAULT:                           /* (taken at once too, so it shows behind the menu) */
+        zoom_default = opt_next(opt_defaults, (int)(sizeof(opt_defaults) / sizeof(opt_defaults[0])), default_zoom_now(), zoom_lo, zoom_hi);
+        snprintf(v, sizeof(v), "%.2f", zoom_default);
+        save_setting("DefaultZoom", v);
+        set_goal(zoom_default, "Esc menu: the default zoom");
+        break;
+    case OPT_LINE_COLOUR:
+        trail_colour = !trail_colour;
+        save_setting("TurnLineColour", trail_colour ? "speed" : "red");
+        break;
+    case OPT_SPEEDO:                            /* dial -> number -> off -> dial */
+        speedo = speedo == 1 ? 2 : speedo == 2 ? 0 : 1;
+        save_setting("Speedometer", speedo == 1 ? "dial" : speedo == 2 ? "number" : "off");
+        break;
+    case OPT_SPEEDO_PLACE:
+        speedo_place = !speedo_place;
+        save_setting("SpeedometerPlace", speedo_place ? "worm" : "corner");
+        break;
+    case OPT_SPEED:
+        speed_zoom = !speed_zoom;
+        say("speed zoom %s (Esc menu)", speed_zoom ? "on" : "off");
+        save_setting("SpeedZoom", speed_zoom ? "1" : "0");
+        break;
+    case OPT_SPEED_FROM:
+        speed_from = opt_next(opt_froms, (int)(sizeof(opt_froms) / sizeof(opt_froms[0])), speed_from, 0.0, 1e9);
+        snprintf(v, sizeof(v), "%.0f", speed_from);
+        save_setting("SpeedZoomFrom", v);
+        break;
+    case OPT_SPEED_STRENGTH: {                  /* (the next smaller multiplier: stronger; after the strongest the weakest) */
+        const int nn = (int)(sizeof(opt_strengths) / sizeof(opt_strengths[0]));
+        int k;
+        for (k = 0; k < nn && opt_strengths[k] >= speed_mult - 1e-6; k++) {}
+        speed_mult = k < nn ? opt_strengths[k] : opt_strengths[0];
+        snprintf(v, sizeof(v), "%.2f", speed_mult);
+        save_setting("SpeedZoomStrength", v);
+        break;
+    }
     case OPT_AUTO: set_auto_zoom(!auto_zoom, "Esc menu"); break;
     case OPT_AUTO_OUT:
         auto_min = opt_next(opt_outs, (int)(sizeof(opt_outs) / sizeof(opt_outs[0])), auto_min, zoom_lo, 1.0);
@@ -2309,7 +2705,7 @@ static void opt_click(int i) {
     }
 }
 
-static const escmenu_options menu_options = { opt_count, opt_label, opt_click };
+static const escmenu_options menu_options = { opt_count, opt_label, opt_click, opt_group };
 
 static LRESULT CALLBACK on_message(int code, WPARAM wp, LPARAM lp) {
     MSG *m = (MSG *)lp;
@@ -2317,19 +2713,20 @@ static LRESULT CALLBACK on_message(int code, WPARAM wp, LPARAM lp) {
         if ((esc_menu || present_ok) && escmenu_message(m)) m->message = WM_NULL;
         else if (wbuf && GetTickCount() - live_tick < 1000) {
             if (m->message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
-                set_goal(zoom_step(zoom_goal, GET_WHEEL_DELTA_WPARAM(m->wParam) / (double)WHEEL_DELTA, cfg.step), "Ctrl + wheel");
+                set_goal(zoom_step2(zoom_goal, GET_WHEEL_DELTA_WPARAM(m->wParam) / (double)WHEEL_DELTA, cfg.step, default_zoom_now()),
+                         "Ctrl + wheel");   /* (100% and the default zoom: stops on the way through) */
                 m->message = WM_NULL;
             } else if ((m->message == WM_MBUTTONDOWN || m->message == WM_MBUTTONUP || m->message == WM_MBUTTONDBLCLK) &&
                        (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
-                if (m->message != WM_MBUTTONUP) set_goal(1.0, "Ctrl + middle click");
+                if (m->message != WM_MBUTTONUP) set_goal(zoom_default, "Ctrl + middle click");
                 m->message = WM_NULL;
             } else if (m->message == WM_KEYDOWN && m->wParam == 'A' && GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_MENU) >= 0) {
                 if (!(m->lParam & (1 << 30))) set_auto_zoom(!auto_zoom, "Ctrl + A");   /* (not the key's repeats) */
                 m->message = WM_NULL;
             } else if (numpad_keys && m->message == WM_KEYDOWN &&
                        (m->wParam == VK_ADD || m->wParam == VK_SUBTRACT || m->wParam == VK_MULTIPLY)) {
-                if (m->wParam == VK_MULTIPLY) set_goal(1.0, "numpad *");
-                else set_goal(zoom_step(zoom_goal, m->wParam == VK_ADD ? 1.0 : -1.0, cfg.step), "numpad");
+                if (m->wParam == VK_MULTIPLY) set_goal(zoom_default, "numpad *");
+                else set_goal(zoom_step2(zoom_goal, m->wParam == VK_ADD ? 1.0 : -1.0, cfg.step, default_zoom_now()), "numpad");
                 m->message = WM_NULL;
             }
         }
@@ -2366,7 +2763,30 @@ static void read_settings(const char *exe) {
         for (i = 0; i < sizeof(places) / sizeof(places[0]); i++) if (!lstrcmpiA(v, places[i])) ind_place = (int)i;
     }
     numpad_keys = ini_flag(ini, "NumpadKeys", 1);
+    if (GetPrivateProfileStringA("wkMapZoom", "DefaultZoom", "", v, sizeof(v), ini) && v[0]) {
+        double d = atof(v);
+        if (strchr(v, '%') || d > 16.0) d /= 100.0;   /* (0.7, 70% or 70) */
+        if (d > 0.0) zoom_default = d < 0.05 ? 0.05 : d > 16.0 ? 16.0 : d;   /* (the zoom range's own limits apply too) */
+    }
     auto_zoom = ini_flag(ini, "AutoZoom", 0);
+    speed_zoom = ini_flag(ini, "SpeedZoom", 0);
+    if (GetPrivateProfileStringA("wkMapZoom", "AutoZoomFallSpeed", "", v, sizeof(v), ini) && v[0]) {
+        const double d = atof(v);
+        if (d >= 0.0 && d <= 5000.0) auto_fall = d;
+    }
+    if (GetPrivateProfileStringA("wkMapZoom", "SpeedZoomFrom", "", v, sizeof(v), ini) && v[0]) {
+        const double d = atof(v);
+        if (d >= 50.0 && d <= 5000.0) speed_from = d;
+    }
+    if (GetPrivateProfileStringA("wkMapZoom", "SpeedZoomStrength", "", v, sizeof(v), ini) && v[0]) {
+        double d = atof(v);
+        if (strchr(v, '%') || d > 1.0) d /= 100.0;   /* (0.7, 70% or 70) */
+        if (d >= 0.1 && d <= 1.0) speed_mult = d;
+    }
+    if (GetPrivateProfileStringA("wkMapZoom", "Speedometer", "", v, sizeof(v), ini) && v[0])
+        speedo = !lstrcmpiA(v, "off") || !strcmp(v, "0") ? 0 : !lstrcmpiA(v, "number") || !strcmp(v, "2") ? 2 : 1;
+    if (GetPrivateProfileStringA("wkMapZoom", "SpeedometerPlace", "", v, sizeof(v), ini) && v[0])
+        speedo_place = !lstrcmpiA(v, "worm") || !lstrcmpiA(v, "above") || !strcmp(v, "1");
     if (GetPrivateProfileStringA("wkMapZoom", "AutoZoomMin", "", v, sizeof(v), ini) && v[0]) {
         auto_min = atof(v);
         if (!(auto_min > 0.0)) auto_min = 0.35;
@@ -2382,6 +2802,8 @@ static void read_settings(const char *exe) {
         trail_all = lstrcmpiA(v, "last") != 0;
     }
     trail_keep = ini_flag(ini, "TurnLineKeep", 0);
+    if (GetPrivateProfileStringA("wkMapZoom", "TurnLineColour", "", v, sizeof(v), ini) && v[0])
+        trail_colour = lstrcmpiA(v, "red") && strcmp(v, "0");
     true_colour = ini_flag(ini, "TrueColour", 1);
     colour_maps = ini_flag(ini, "ColourMaps", 1);
     esc_menu = ini_flag(ini, "EscMenu", 1);
@@ -2627,9 +3049,9 @@ static void install(void) {
         msg_hook = SetWindowsHookExA(WH_GETMESSAGE, on_message, self, GetCurrentThreadId());
         if (!msg_hook) say("could not watch the mouse wheel (error %lu)", GetLastError());
     }
-    say("wkMapZoom %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), Ctrl + middle click 100%%%s; "
-        "true colour %s, full-colour maps %s, Esc menu resolution %s, movement line %s, auto zoom %s",
-        installed ? "ready" : "failed", (unsigned)base, 100.0 / cfg.max_out, cfg.max_in * 100.0,
+    say("wkMapZoom 4.3 beta %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), default zoom %.0f%% (Ctrl + "
+        "middle click%s); true colour %s, full-colour maps %s, Esc menu resolution %s, movement line %s, auto zoom %s",
+        installed ? "ready" : "failed", (unsigned)base, 100.0 / cfg.max_out, cfg.max_in * 100.0, zoom_default * 100.0,
         numpad_keys ? ", numpad + / - / *" : "", tc_ok ? "on (Direct3D 9)" : "off", colour_maps ? "on" : "off",
         esc_menu ? "on" : "off", trail_on ? (trail_all ? "on (whole game)" : "on (last turn)") : "off",
         worms_ok ? (auto_zoom ? "on (Ctrl + A switches it)" : "off (Ctrl + A switches it)") : "unavailable");

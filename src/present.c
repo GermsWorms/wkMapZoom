@@ -39,6 +39,9 @@ static void (*on_gone)(int stuck), (*on_back)(void);
 static DWORD gone_posted, notreset_since;
 static volatile LONG ready;
 static int failed, logged_size, logged_on, logged_gone, logged_remade, test_gone;
+static int fmt_bad;                     /* the back buffer's format can't be used (until the device is made anew) */
+static int size_bad;                    /* a frame of another size refused (until one is shown, or the device anew) */
+static DWORD hook_tick;                 /* WA's Direct3D 9 show-frame last ran */
 static unsigned shown, gone_frames, remake_wait;
 static void *surf, *surf_dev;
 static UINT surf_w, surf_h, surf_fmt;
@@ -177,6 +180,7 @@ int __cdecl present_show(uint32_t *r) {
     long hr;
     int ok;
     if (!backend || !result) return 0;
+    hook_tick = GetTickCount();             /* (WA is on a Direct3D 9 renderer: present_live) */
     if (guard(r, (uintptr_t)backend, result)) { InterlockedExchange(&ready, 0); return 1; }
     if (!InterlockedExchange(&ready, 0) || failed || !compose) return 0;
     dev = *(void **)((char *)backend + 0x40);
@@ -188,6 +192,7 @@ int __cdecl present_show(uint32_t *r) {
     ((f_getdesc)SLOT(bb, 12))(bb, desc);                     /* format, type, usage, pool, ms, quality, width, height */
     if (desc[0] != 21 && desc[0] != 22) {                    /* (A8R8G8B8 / X8R8G8B8 only) */
         if (!logged_size) { logged_size = 1; say("true colour: back buffer format %u, not used", desc[0]); }
+        fmt_bad = 1;
         release(bb);
         return 0;
     }
@@ -209,6 +214,7 @@ int __cdecl present_show(uint32_t *r) {
     ((f_unlock)SLOT(surf, 14))(surf);
     if (!ok) {
         if (!logged_size) { logged_size = 1; say("true colour: back buffer %ux%u is not the frame's size, not used", desc[6], desc[7]); }
+        size_bad = 1;
         release(bb);
         return 0;
     }
@@ -219,6 +225,7 @@ int __cdecl present_show(uint32_t *r) {
         say("true colour off: UpdateSurface into the back buffer failed (%08lx); WA's own colours from now on", (unsigned long)hr);
         return 0;
     }
+    size_bad = 0;
     if (!logged_on) { logged_on = 1; say("true colour: on (back buffer %ux%u, format %u)", desc[6], desc[7], desc[0]); }
     shown++;
     *result = *(uint32_t *)VA(0x8ac8b4);
@@ -230,7 +237,11 @@ void present_ready(void) { InterlockedExchange(&ready, 1); }
 unsigned present_shown(void) { return shown; }
 void present_on_gone(void (*gone)(int stuck), void (*back)(void)) { on_gone = gone; on_back = back; }
 /* the module's surface let go (before WA's display is set up again: it holds no device of WA's after) */
-void present_forget(void) { release(surf); surf = NULL; surf_dev = NULL; }
+void present_forget(void) { release(surf); surf = NULL; surf_dev = NULL; fmt_bad = 0; size_bad = 0; }
+int present_live(void) {
+    const DWORD now = GetTickCount();
+    return compose && !failed && !fmt_bad && !size_bad && hook_tick && now - hook_tick < 1000;
+}
 void present_test_gone(int frames) { test_gone = frames; say("test: %d frames as with no Direct3D device", frames); }
 
 int present_install(uintptr_t b, present_compose_fn c, void (*log)(const char *, ...)) {

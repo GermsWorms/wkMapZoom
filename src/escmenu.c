@@ -36,7 +36,8 @@
 #define DISPLAY_ID 0x58u
 #define MODE_ID 0x60u
 #define MAX_MODES 10
-#define OPTS_ID 0x59u                   /* the module's options row, and its options */
+#define OPTS_ID 0x59u                   /* the module's options row, its "More options" row, and its options */
+#define MORE_ID 0x5au
 #define OPT_ID 0x70u
 #define MAX_OPTS 12
 #define MSG_SWITCH (WM_APP + 0x4d5a)
@@ -55,8 +56,8 @@ static int keep_setting = 1, opened, nlisted, pending_w, pending_h, pending_togg
 static int listed_w[MAX_MODES], listed_h[MAX_MODES];
 static char labels[MAX_MODES + 2][48];  /* (WA keeps pointers to them) */
 static const escmenu_options *opts;
-static int opts_open, nopts;
-static char opt_labels[MAX_OPTS + 1][64];
+static int opts_open, opts_page, opt_first, opt_end;   /* (the page shown, and its options: [first, end)) */
+static char opt_labels[MAX_OPTS + 1][64], more_label[48];
 static uintptr_t runtime_now;
 static DWORD runtime_tick;             /* (when a game frame last gave runtime_now: after the game it is freed) */
 static int test_any_size;               /* (test mode: a fullscreen size that is no mode, to see the rollback) */
@@ -186,24 +187,55 @@ void __cdecl esc_after_first(uint32_t *r) {
     y = last + row + 1;
     if (esc_call_append(panel, x, DISPLAY_ID, labels[MAX_MODES + 1], y)) last = y;
 options:
-    nopts = 0;
+    opt_first = opt_end = 0;
     if (opts && opts->count() > 0) {        /* the module's options: a row, and opened, one row each under it */
         snprintf(opt_labels[0], sizeof(opt_labels[0]), "Map zoom options %s", opts_open ? "-" : "+");
         y = last + row + 1;
         if (esc_call_append(panel, x, OPTS_ID, opt_labels[0], y)) {
             last = y;
             if (opts_open) {
+                /* (room: the rows left above WA's own still to come -- at most 4 and the Volume slider: 5 steps) */
                 uint32_t bitmap = U32((uintptr_t)panel), bh = bitmap ? U32((uintptr_t)bitmap + 0x18) : 0, step = row + 1;
                 uint32_t room = bh > last + 5 * step + 8 ? (bh - (last + 5 * step + 8)) / (step ? step : 1) : 0;
-                int n = opts->count(), fit = n;
-                if (fit > MAX_OPTS) fit = MAX_OPTS;
-                if ((uint32_t)fit > room) { say("Esc menu: room for %u of %d options (menu bitmap height %u)", room, n, bh); fit = (int)room; }
-                for (k = 0; k < fit; k++) {
+                int n = opts->count(), starts[MAX_OPTS + 1], pages = 0, s;
+                static int said_pages = -1, said_room = -1;
+                if (n > MAX_OPTS) n = MAX_OPTS;
+                if ((uint32_t)n <= room) { starts[0] = 0; pages = 1; }
+                else if (room >= 2) {               /* pages of room - 1 options (and the "More" row): whole groups where
+                                                       they fit, a group bigger than a page split */
+                    const int per = (int)room - 1;
+                    for (s = 0; s < n; ) {
+                        int end = s;
+                        while (end < n) {
+                            int g = end + 1;
+                            while (g < n && opts->group && opts->group(g) == opts->group(end)) g++;
+                            if (g - s > per) break;
+                            end = g;
+                        }
+                        if (end == s) end = s + per < n ? s + per : n;
+                        starts[pages++] = s;
+                        s = end;
+                    }
+                } else { starts[0] = 0; pages = 1; n = (int)room; }   /* (no room for a page and its "More" row) */
+                starts[pages] = n;
+                if (pages != said_pages || (int)room != said_room) {
+                    said_pages = pages; said_room = (int)room;
+                    if (pages > 1) say("Esc menu: room for %u rows (menu bitmap height %u): the options in %d pages", room, bh, pages);
+                    else if (n < opts->count()) say("Esc menu: room for %u of %d options (menu bitmap height %u)", room, opts->count(), bh);
+                }
+                if (opts_page >= pages) opts_page = 0;
+                for (k = starts[opts_page]; k < starts[opts_page + 1]; k++) {
                     opts->label(k, opt_labels[1 + k], sizeof(opt_labels[0]));
                     y = last + step;
                     if (!esc_call_append(panel, x, OPT_ID + (uint32_t)k, opt_labels[1 + k], y)) { say("Esc menu: the panel is full at option %d", k); break; }
                     last = y;
-                    nopts = k + 1;
+                    if (k == starts[opts_page]) opt_first = k;
+                    opt_end = k + 1;
+                }
+                if (pages > 1) {
+                    snprintf(more_label, sizeof(more_label), "More options (%d/%d) +", opts_page + 1, pages);
+                    y = last + step;
+                    if (esc_call_append(panel, x, MORE_ID, more_label, y)) last = y;
                 }
             }
         }
@@ -237,10 +269,11 @@ static int __stdcall hook_activate(void *panel, uint32_t *out) {
     id = *out;
     if (id == DISPLAY_ID) { escmenu_ask(0, 0); return 0; }
     if (id == HEADER_ID) { opened = !opened; if (opened) opts_open = 0; refresh(runtime_now); return 0; }
-    if (id == OPTS_ID) { opts_open = !opts_open; if (opts_open) opened = 0; refresh(runtime_now); return 0; }
+    if (id == OPTS_ID) { opts_open = !opts_open; if (opts_open) { opened = 0; opts_page = 0; } refresh(runtime_now); return 0; }
+    if (id == MORE_ID) { opts_page++; refresh(runtime_now); return 0; }   /* (past the last page: the first) */
     if (id >= OPT_ID && id < OPT_ID + MAX_OPTS) {
         const int i = (int)(id - OPT_ID);
-        if (opts && i < nopts) opts->click(i);
+        if (opts && i >= opt_first && i < opt_end) opts->click(i);
         refresh(runtime_now);
         return 0;
     }
@@ -770,8 +803,15 @@ void escmenu_test_open(void) {
     say("test: WA's Esc menu opened (%s)", U32(runtime_now + 0x434) == 1 ? "open" : "not open");
 }
 
+void escmenu_test_more(void) {
+    opts_page++;
+    say("test: the options' next page");
+    refresh(runtime_now);
+}
+
 void escmenu_test_options(void) {
     opts_open = 1;
+    opts_page = 0;
     opened = 0;
     say("test: the options opened (Esc menu %s)", runtime_now && U32(runtime_now + 0x434) == 1 ? "open" : "not open");
     refresh(runtime_now);

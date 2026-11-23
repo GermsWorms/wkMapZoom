@@ -34,6 +34,36 @@ int main(void) {
     CHECK(NEAR(zoom_step(1.15, 0.5, 1.15), 1.15 * sqrt(1.15)));
     z = 1.0; for (i = 0; i < 40; i++) z = zoom_clamp(zoom_step(z, -1, 1.15), 0.5, 4.0); CHECK(NEAR(z, 0.5));
     z = 1.0; for (i = 0; i < 40; i++) z = zoom_clamp(zoom_step(z, 1, 1.15), 0.5, 4.0); CHECK(NEAR(z, 4.0));
+    /* a second stop (the default zoom): reached both ways, and 100% still a stop */
+    CHECK(NEAR(zoom_step2(1.0, -1, 1.15, 0.9), 0.9));                     /* (1 -> 0.87 passes 0.9) */
+    CHECK(NEAR(zoom_step2(0.9, -1, 1.15, 0.9), 0.9 / 1.15));          /* (from the stop: on) */
+    CHECK(NEAR(zoom_step2(0.8, 1, 1.15, 0.9), 0.9));                      /* (0.8 -> 0.92 passes 0.9) */
+    CHECK(NEAR(zoom_step2(0.9, 1, 1.15, 0.9), 1.0));                      /* (0.9 -> 1.035: near 100%) */
+    CHECK(NEAR(zoom_step2(0.85, 2, 1.15, 0.9), 0.9));                     /* (both passed: the nearer) */
+    CHECK(NEAR(zoom_step2(1.2, -2, 1.15, 0.9), 1.0));
+    CHECK(NEAR(zoom_step2(0.9, 1, 1.15, 1.0), 1.0) && NEAR(zoom_step2(0.9, 1, 1.15, 0.0), 1.0));   /* (no second stop) */
+    z = 1.0; for (i = 0; i < 6; i++) z = zoom_step2(z, -1, 1.15, 0.7); CHECK(NEAR(z, 0.7 / pow(1.15, 3)));   /* (0.87, 0.756, 0.7, ...) */
+    z = 0.4; for (i = 0; i < 4; i++) z = zoom_step2(z, 1, 1.15, 0.7); CHECK(NEAR(z, 0.7));
+    z = 0.8; for (i = 0; i < 3; i++) z = zoom_step2(z, 10.0 / 120.0, 1.15, 0.8); CHECK(z > 0.8 + 1e-3);   /* (a touchpad's
+                                                                    small turns leave the stop) */
+    z = 1.0; for (i = 0; i < 3; i++) z = zoom_step2(z, -10.0 / 120.0, 1.15, 0.8); CHECK(z < 1.0 - 1e-3);
+    {   /* steps of 1 to 8 / 120 notch (a precision touchpad) leave 100% and the default stop both ways, and never jump
+         * back the other way */
+        int dlt, dir, st;
+        for (dlt = 1; dlt <= 8; dlt++) for (dir = -1; dir <= 1; dir += 2) for (st = 0; st < 2; st++) {
+            const double stop = st ? 0.8 : 1.0, def = 0.8;
+            double zz = stop, prev;
+            int moved_back = 0;
+            for (i = 0; i < 60; i++) {
+                prev = zz;
+                zz = zoom_step2(zz, dir * dlt / 120.0, 1.15, def);
+                if ((zz - prev) * dir < -1e-12) moved_back = 1;
+            }
+            CHECK(!moved_back && fabs(log(zz / stop)) > 0.05);
+        }
+        z = 0.99; for (i = 0; i < 20; i++) z = zoom_step2(z, -4.0 / 120.0, 1.15, 0.99); CHECK(z < 0.98);   /* (two stops
+                                                                    1% apart: down from 0.99 goes down) */
+    }   /* (0.46, 0.529, 0.608, 0.7) */
 
     /* easing: no move with no time, most of the way in ~3 time constants, lands exactly, never overshoots */
     CHECK(zoom_ease(1.0, 2.0, 0.0) == 1.0);

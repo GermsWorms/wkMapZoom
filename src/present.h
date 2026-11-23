@@ -13,6 +13,9 @@ int present_install(uintptr_t base, present_compose_fn compose, void (*say)(cons
 void present_ready(void);
 /* how many frames were shown in true colour (for the log) */
 unsigned present_shown(void);
+/* true colour is live: WA's Direct3D 9 show-frame ran in the last second and nothing stops the module's frame from
+ * being shown (not failed, the back buffer's format usable, no frame of another size refused since one was shown) */
+int present_live(void);
 /* gone: called (from inside WA's show-frame, so it should only post a message) about once a second while WA has no
  * device (stuck 0), or once every 3 s while WA's Reset of its device keeps failing (stuck 1); back: the device is there
  * again after it was gone */
