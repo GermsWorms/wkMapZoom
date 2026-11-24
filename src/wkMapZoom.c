@@ -32,11 +32,13 @@
  *            is (the auto zoom's and the speed zoom's; they only look)
  *   a WH_GETMESSAGE hook on WA's own thread: Ctrl + wheel, numpad + / - / *, Ctrl + middle click, Ctrl + A (taken out
  *   of WA's queue)
- * Exported: wkMapZoom_View (the zoom and the camera of the frame being drawn, for modules that draw on the map).
+ * Exported: wkMapZoom_View (the zoom and the camera of the frame being drawn, for modules that draw on the map), and
+ * wkModSettings / wkModSettingsChanged (what the settings are, and that one was changed: the Mods menu of wkModMenu).
  *
  * Settings (all optional) in wkMapZoom.ini beside WA.exe, section [wkMapZoom]: MaxOut, MaxIn, Step, Smooth, Filter,
- * Indicator, IndicatorPlace, NumpadKeys, DefaultZoom, AutoZoom, AutoZoomMin, AutoZoomMax, AutoZoomFallSpeed, SpeedZoom,
- * SpeedZoomFrom, SpeedZoomStrength (see the README; Ctrl + A writes AutoZoom back).
+ * Indicator, IndicatorPlace, DefaultZoom, AutoZoom, AutoZoomMin, AutoZoomMax, AutoZoomFallSpeed, SpeedZoom,
+ * SpeedZoomFrom, SpeedZoomStrength, ZoomModifier, ZoomInKey, ZoomOutKey, ZoomResetKey, AutoZoomKey (see the README; the
+ * auto zoom's key writes AutoZoom back).
  * Log: %LOCALAPPDATA%\wkMapZoom\wkMapZoom.log.
  *
  * Test mode (environment WKMAPZOOM_TEST=1, for an isolated copy of WA only): the in-memory options become windowed
@@ -60,7 +62,7 @@
 #include "zoom_math.h"
 #include "zoom_badge.h"
 
-#define VERSION "5.0 beta"
+#define VERSION "5.1 beta"
 
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020a
@@ -1221,6 +1223,45 @@ static void __fastcall hook_render(void *runtime) {
 /* ---- settings and keys ------------------------------------------------------------------------------------------- */
 static char ini_path[MAX_PATH];
 
+/* ---- a key as text: "A", "Ctrl+A", "Alt+F6", "Shift+PageUp", "Numpad +", "Key 220" (a virtual-key number), "none" ---- */
+typedef struct { int vk, mods; } keybind;   /* mods: 1 Ctrl, 2 Alt, 4 Shift; vk 0: none */
+static const struct { int vk; const char *name; } key_names[] = {
+    {VK_SPACE, "Space"}, {VK_TAB, "Tab"}, {VK_RETURN, "Enter"}, {VK_BACK, "Backspace"}, {VK_INSERT, "Insert"}, {VK_DELETE, "Delete"},
+    {VK_HOME, "Home"}, {VK_END, "End"}, {VK_PRIOR, "PageUp"}, {VK_NEXT, "PageDown"}, {VK_LEFT, "Left"}, {VK_RIGHT, "Right"},
+    {VK_UP, "Up"}, {VK_DOWN, "Down"}, {VK_ADD, "Numpad +"}, {VK_SUBTRACT, "Numpad -"}, {VK_MULTIPLY, "Numpad *"},
+    {VK_DIVIDE, "Numpad /"}, {VK_DECIMAL, "Numpad ."}, {VK_PAUSE, "Pause"}, {VK_SCROLL, "ScrollLock"}, {VK_CAPITAL, "CapsLock"}};
+static int key_pre(const char *t, const char *p) {   /* t starts with p, whatever the letters' case */
+    for (; *p; t++, p++) if ((*t | 0x20) != (*p | 0x20)) return 0;
+    return 1;
+}
+static keybind key_parse(const char *text) {
+    keybind k = {0, 0};
+    unsigned i;
+    int n;
+    while (*text == ' ') text++;
+    for (;;) {
+        if (key_pre(text, "Ctrl+")) { k.mods |= 1; text += 5; }
+        else if (key_pre(text, "Alt+")) { k.mods |= 2; text += 4; }
+        else if (key_pre(text, "Shift+")) { k.mods |= 4; text += 6; }
+        else break;
+    }
+    if (!text[0] || !lstrcmpiA(text, "none")) { k.mods = 0; return k; }
+    if (!text[1] && ((text[0] >= '0' && text[0] <= '9') || ((text[0] | 0x20) >= 'a' && (text[0] | 0x20) <= 'z'))) k.vk = text[0] >= 'a' ? text[0] - 32 : text[0];
+    else if ((text[0] | 0x20) == 'f' && sscanf(text + 1, "%d", &n) == 1 && n >= 1 && n <= 24 && strlen(text) <= 3) k.vk = VK_F1 + n - 1;
+    else if (key_pre(text, "Numpad ") && text[7] >= '0' && text[7] <= '9' && !text[8]) k.vk = VK_NUMPAD0 + text[7] - '0';
+    else if (key_pre(text, "Key ") && sscanf(text + 4, "%d", &n) == 1 && n > 0 && n < 256) k.vk = n;
+    else for (i = 0; i < sizeof(key_names) / sizeof(key_names[0]); i++) if (!lstrcmpiA(text, key_names[i].name)) k.vk = key_names[i].vk;
+    if (!k.vk) k.mods = 0;
+    return k;
+}
+static int key_mods_now(void) { return (GetKeyState(VK_CONTROL) < 0 ? 1 : 0) | (GetKeyState(VK_MENU) < 0 ? 2 : 0) | (GetKeyState(VK_SHIFT) < 0 ? 4 : 0); }
+/* the keys (wkMapZoom.ini; changed in the game through wkModMenu): zoom in, out, back to the default zoom, the auto
+ * zoom on / off, and the key held with the wheel and the middle click (1 Ctrl, 2 Alt, 4 Shift) */
+static keybind key_in = {VK_ADD, 0}, key_out = {VK_SUBTRACT, 0}, key_reset = {VK_MULTIPLY, 0}, key_auto = {'A', 1};
+static int wheel_mod = 1;
+static int wheel_held(WPARAM keys) { return wheel_mod == 2 ? GetKeyState(VK_MENU) < 0 : wheel_mod == 4 ? (keys & MK_SHIFT) != 0 : (keys & MK_CONTROL) != 0; }
+static int key_is(const MSG *m, keybind k) { return k.vk && (int)m->wParam == k.vk && key_mods_now() == k.mods; }
+
 static void save_setting(const char *key, const char *value) {
     if (test_mode || !ini_path[0]) { say("%s=%s (test mode: not saved)", key, value); return; }
     if (WritePrivateProfileStringA("wkMapZoom", key, value, ini_path)) say("%s=%s saved", key, value);
@@ -1246,25 +1287,24 @@ static void ask_zoom(double z, const char *why) {
 static LRESULT CALLBACK on_message(int code, WPARAM wp, LPARAM lp) {
     MSG *m = (MSG *)lp;
     if (code == HC_ACTION && wp == PM_REMOVE && m && fit_ok && GetTickCount() - live_tick < 1000) {
-        if (m->message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
+        if (m->message == WM_MOUSEWHEEL && wheel_held(GET_KEYSTATE_WPARAM(m->wParam))) {
             ask_zoom(zoom_step2(zoom_goal, GET_WHEEL_DELTA_WPARAM(m->wParam) / (double)WHEEL_DELTA, cfg.step, default_zoom_now()),
-                     "Ctrl + wheel");       /* (100% and the default zoom: stops on the way through) */
+                     "the wheel");          /* (100% and the default zoom: stops on the way through) */
             m->message = WM_NULL;
         } else if ((m->message == WM_MBUTTONDOWN || m->message == WM_MBUTTONUP || m->message == WM_MBUTTONDBLCLK) &&
-                   (GET_KEYSTATE_WPARAM(m->wParam) & MK_CONTROL)) {
-            if (m->message != WM_MBUTTONUP) ask_zoom(zoom_default, "Ctrl + middle click");
+                   wheel_held(GET_KEYSTATE_WPARAM(m->wParam))) {
+            if (m->message != WM_MBUTTONUP) ask_zoom(zoom_default, "the middle click");
             m->message = WM_NULL;
-        } else if (m->message == WM_KEYDOWN && m->wParam == 'A' && GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_MENU) >= 0) {
+        } else if ((m->message == WM_KEYDOWN || m->message == WM_SYSKEYDOWN) && key_is(m, key_auto)) {
             if (!(m->lParam & (1 << 30))) {  /* (not the key's repeats) */
                 if (!worms_ok) show_message("Auto zoom: unavailable");
                 else if (!d3d.begin) show_message("Zoom needs wkDirect3D");
-                else set_auto_zoom(!auto_zoom, "Ctrl + A");
+                else set_auto_zoom(!auto_zoom, "its key");
             }
             m->message = WM_NULL;
-        } else if (numpad_keys && m->message == WM_KEYDOWN &&
-                   (m->wParam == VK_ADD || m->wParam == VK_SUBTRACT || m->wParam == VK_MULTIPLY)) {
-            if (m->wParam == VK_MULTIPLY) ask_zoom(zoom_default, "numpad *");
-            else ask_zoom(zoom_step2(zoom_goal, m->wParam == VK_ADD ? 1.0 : -1.0, cfg.step, default_zoom_now()), "numpad");
+        } else if ((m->message == WM_KEYDOWN || m->message == WM_SYSKEYDOWN) && (key_is(m, key_in) || key_is(m, key_out) || key_is(m, key_reset))) {
+            if (key_is(m, key_reset)) ask_zoom(zoom_default, "the default zoom's key");
+            else ask_zoom(zoom_step2(zoom_goal, key_is(m, key_in) ? 1.0 : -1.0, cfg.step, default_zoom_now()), "a zoom key");
             m->message = WM_NULL;
         }
     }
@@ -1278,6 +1318,7 @@ static int ini_flag(const char *ini, const char *key, int dflt) {
     return atoi(v) != 0 || !lstrcmpiA(v, "on") || !lstrcmpiA(v, "yes") || !lstrcmpiA(v, "true");
 }
 
+static int told_old;
 static void read_settings(const char *exe) {
     static const char *const gone[] = {"Speedometer", "SpeedometerPlace", "TurnLine", "TurnLineKeep", "TurnLineColour"};
     static const char *const dropped[] = {"TrueColour", "ColourMaps", "MapTheme", "EscMenu"};
@@ -1302,6 +1343,17 @@ static void read_settings(const char *exe) {
         for (i = 0; i < sizeof(places) / sizeof(places[0]); i++) if (!lstrcmpiA(v, places[i])) ind_place = (int)i;
     }
     numpad_keys = ini_flag(ini, "NumpadKeys", 1);
+    {   /* the keys (NumpadKeys=0, an older file's switch: the three zoom keys are none unless named) */
+        static const struct { const char *name, *dflt; keybind *to; int numpad; } keys[] = {
+            {"ZoomInKey", "Numpad +", &key_in, 1}, {"ZoomOutKey", "Numpad -", &key_out, 1}, {"ZoomResetKey", "Numpad *", &key_reset, 1},
+            {"AutoZoomKey", "Ctrl+A", &key_auto, 0}};
+        for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+            GetPrivateProfileStringA("wkMapZoom", keys[i].name, keys[i].numpad && !numpad_keys ? "none" : keys[i].dflt, v, sizeof(v), ini);
+            *keys[i].to = key_parse(v);
+        }
+        if (GetPrivateProfileStringA("wkMapZoom", "ZoomModifier", "", v, sizeof(v), ini) && v[0])
+            wheel_mod = !lstrcmpiA(v, "alt") ? 2 : !lstrcmpiA(v, "shift") ? 4 : 1;
+    }
     if (GetPrivateProfileStringA("wkMapZoom", "DefaultZoom", "", v, sizeof(v), ini) && v[0]) {
         double d = atof(v);
         if (strchr(v, '%') || d > 16.0) d /= 100.0;   /* (0.7, 70% or 70) */
@@ -1332,17 +1384,59 @@ static void read_settings(const char *exe) {
         if (!(auto_max >= 1.0)) auto_max = 1.0;
         if (auto_max > 8.0) auto_max = 8.0;
     }
-    for (i = 0; i < sizeof(gone) / sizeof(gone[0]); i++)
+    for (i = 0; !told_old && i < sizeof(gone) / sizeof(gone[0]); i++)
         if (GetPrivateProfileStringA("wkMapZoom", gone[i], "", v, sizeof(v), ini) && v[0]) {
             say("wkMapZoom.ini has %s=%s: the speedometer and the movement line are the module wkSpeedometer now (its own wkSpeedometer.ini)", gone[i], v);
             break;
         }
-    for (i = 0; i < sizeof(dropped) / sizeof(dropped[0]); i++)
+    for (i = 0; !told_old && i < sizeof(dropped) / sizeof(dropped[0]); i++)
         if (GetPrivateProfileStringA("wkMapZoom", dropped[i], "", v, sizeof(v), ini) && v[0]) {
             say("wkMapZoom.ini has %s=%s: true colour, full-colour maps and the Esc menu's items are not in wkMapZoom 5 (4.3 had them)", dropped[i], v);
             break;
         }
+    told_old = 1;                           /* (said once, not at every re-read) */
     zoom_cfg_sane(&cfg);
+}
+
+/* ---- for wkModMenu (github.com/GermsWorms/wkModMenu): what the settings are, and that one was changed in the game ------ */
+static char exe_path[MAX_PATH];
+__declspec(dllexport) const char *__cdecl wkModSettings(void) {
+    return "wkModSettings 1\n"
+           "title=wkMapZoom\n"
+           "file=wkMapZoom.ini\n"
+           "section=wkMapZoom\n"
+           "live=1\n"
+           "AutoZoom|Auto zoom|bool||0|The map zooms on its own to fit the space around your worm: out where it opens up, in where it is tight. Ctrl + A switches it too.\n"
+           "AutoZoomMin|Auto zoom: out to|pct|0.25:1:0.05|0.35|The furthest the auto zoom and the speed zoom go out, as a share of your own zoom. 100% = never out.\n"
+           "AutoZoomMax|Auto zoom: in to|pct|1:3:0.25|1.5|The furthest the auto zoom goes in. 100% = never in.\n"
+           "AutoZoomFallSpeed|Auto zoom: falling from|int|0:2000:100|1000|Falling at least this fast (pixels a second), the auto zoom keeps the ground below on screen. 0 = always, above 1600 = never.\n"
+           "SpeedZoom|Speed zoom|bool||0|Past a speed the map zooms out, more the faster your worm goes.\n"
+           "SpeedZoomFrom|Speed zoom: from|int|400:1600:100|800|The speed the speed zoom starts at, in pixels a second.\n"
+           "SpeedZoomStrength|Speed zoom: strength|num|0.5:0.95:0.05|0.7|The zoom is multiplied by this for every 500 px/s over the start speed. Smaller is stronger.\n"
+           "DefaultZoom|Default zoom|pct|0.25:4:0.05|1|The zoom each game starts at. Ctrl + middle click and numpad * go back to it. Changed here, it is taken at once.\n"
+           "Indicator|Zoom number|choice|zooming,always,off|zooming|The zoom shown as a number: while you zoom, always (while not at the default zoom), or never.\n"
+           "IndicatorPlace|Zoom number: place|choice|top-right,top-left,top,bottom-right,bottom-left,bottom|top-right|Where the zoom number is shown.\n"
+           "Filter|Picture|choice|smooth,nearest|smooth|smooth: each screen pixel is the average of the map pixels it covers. nearest: plain pixel picking.\n"
+           "Smooth|Glide to a new zoom|bool||1|On: the zoom glides to its new value. Off: it jumps.\n"
+           "Step|Zoom per wheel notch|num|1.05:2:0.05|1.15|How much one notch of the wheel (or one numpad press) zooms.\n"
+           "ZoomModifier|Key held with the wheel|choice|ctrl,alt,shift|ctrl|The key you hold while turning the mouse wheel to zoom (and while clicking the middle button to go back to the default zoom).\n"
+           "ZoomInKey|Key: zoom in|key||Numpad +|A key that zooms in one step. Click, then press the key (with Ctrl, Alt or Shift if you like). Delete: none.\n"
+           "ZoomOutKey|Key: zoom out|key||Numpad -|A key that zooms out one step.\n"
+           "ZoomResetKey|Key: default zoom|key||Numpad *|A key that goes back to the default zoom.\n"
+           "AutoZoomKey|Key: auto zoom on / off|key||Ctrl+A|The key that switches the auto zoom.\n"
+           "MaxOut|Furthest out|int|1:8:1|4|How far out you can zoom: 4 = 25%, 8 = 12.5% (if the graphics card can make a map that big).\n"
+           "MaxIn|Furthest in|int|1:16:1|8|How far in you can zoom: 8 = 800%.\n";
+}
+__declspec(dllexport) void __cdecl wkModSettingsChanged(void) {
+    const double was_default = zoom_default, was_out = cfg.max_out, was_in = cfg.max_in;
+    if (!exe_path[0]) return;
+    read_settings(exe_path);
+    if (cfg.max_out != was_out || cfg.max_in != was_in) fit_ok = 0;   /* (the zoom range: worked out again at the next frame) */
+    if (zoom_default != was_default) set_goal(zoom_default, "its default changed in the Mods menu");
+    ind_changed = GetTickCount();
+    say("settings read again (changed in the Mods menu): auto zoom %s (%.0f%% .. %.0f%%), speed zoom %s, default zoom %.0f%%, zoom number %s",
+        auto_zoom ? "on" : "off", auto_min * 100.0, auto_max * 100.0, speed_zoom ? "on" : "off", zoom_default * 100.0,
+        ind_mode == IND_OFF ? "off" : ind_mode == IND_ALWAYS ? "always" : "while zooming");
 }
 
 static int runs_without_screen(void) {
@@ -1460,6 +1554,7 @@ static void install(void) {
                 "installed -- use one zoom module, and one copy of it, at a time");
         return;
     }
+    strcpy(exe_path, exe);
     read_settings(exe);
     QueryPerformanceFrequency(&clock_freq);
     test_mode = GetEnvironmentVariableA("WKMAPZOOM_TEST", path, sizeof(path)) > 0;

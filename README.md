@@ -17,13 +17,14 @@ size, and a small number (for example `150%`) shows the zoom while it changes.
 >   [wkSpeedometer](https://github.com/GermsWorms/wkSpeedometer). Install it next to this one if you want them.
 > - Gone from wkMapZoom: its own drawing, the true-colour picture, full-colour PNG / JPEG maps, and everything it
 >   added to WA's Esc menu (the Resolution list, the Fullscreen / Windowed switch, "Map zoom options"). Settings are
->   in `wkMapZoom.ini`; Ctrl + A still switches the auto zoom.
+>   in `wkMapZoom.ini`, and can be changed in the game with [wkModMenu](https://github.com/GermsWorms/wkModMenu)
+>   (5.1: every setting, the keys too, applied at once); Ctrl + A still switches the auto zoom.
 > - **The last version with all of that is 4.3 beta 2.** It needs no other module and works on every renderer. Its
 >   files are in [`release/` at 4.3 beta 2](https://github.com/GermsWorms/wkMapZoom/tree/f2ee621/release) (the last
 >   stable one, 4.2, [here](https://github.com/GermsWorms/wkMapZoom/tree/cc9b734/release)).
 >
 > If something goes wrong, please [open an issue](https://github.com/GermsWorms/wkMapZoom/issues) with the logs (see
-> Notes; the first lines say "wkMapZoom 5.0 beta").
+> Notes; the first lines say "wkMapZoom 5.1 beta").
 
 ![Auto zoom on a rope race map](screenshots/auto-zoom.gif)
 
@@ -95,6 +96,10 @@ says in its log how big a map it could make. If it cannot make the biggest one, 
 | **Ctrl + middle click**, **numpad \*** | back to the default zoom (100% unless you change it) |
 | **Ctrl + A** | auto zoom on / off |
 
+The keys can be changed (5.1): `ZoomModifier`, `ZoomInKey`, `ZoomOutKey`, `ZoomResetKey` and `AutoZoomKey` in
+`wkMapZoom.ini`, or in the game with [wkModMenu](https://github.com/GermsWorms/wkModMenu): click the key, press the
+new one.
+
 Uninstall: delete `wkMapZoom.dll`.
 
 ## Notes
@@ -131,7 +136,10 @@ Uninstall: delete `wkMapZoom.dll`.
 | `Filter` | `smooth` | `smooth`: each screen pixel is the average of the map pixels it covers; `nearest`: plain pixel picking |
 | `Indicator` | `zooming` | the zoom number: `zooming` (shown while zooming, then fades), `always` (stays while not at the default zoom), `off` |
 | `IndicatorPlace` | `top-right` | or `top-left`, `top`, `bottom-right`, `bottom-left`, `bottom` |
-| `NumpadKeys` | `1` | numpad + / − / \* zoom (0 = left to WA) |
+| `ZoomModifier` | `ctrl` | the key held with the wheel (and the middle click): `ctrl`, `alt` or `shift` |
+| `ZoomInKey`, `ZoomOutKey`, `ZoomResetKey` | `Numpad +`, `Numpad -`, `Numpad *` | keys that zoom in, out, and go back to the default zoom. A key is written as `A`, `Ctrl+A`, `Alt+F6`, `Shift+PageUp`, `Numpad 5`, `Space`, `Key 220` (a virtual-key number) or `none` |
+| `AutoZoomKey` | `Ctrl+A` | the key that switches the auto zoom |
+| `NumpadKeys` | `1` | an older switch: 0 = the three zoom keys are none unless named above |
 | `DefaultZoom` | `1` | the zoom each game starts at, and that Ctrl + middle click and numpad \* go back to (0.7 = 70%; `70%` works too) |
 | `AutoZoom` | `0` | the auto zoom on (Ctrl + A switches it, and saves it here) |
 | `AutoZoomMin` | `0.35` | the furthest the auto zoom (and the speed zoom) goes out, as a share of your own zoom (0.35 = 35% at 100%; 1 = never out) |
@@ -171,7 +179,8 @@ message handler and `004FCDF0` an object's physics step (whose turn it is and wh
 a `WH_GETMESSAGE` hook on WA's thread for the wheel and the keys. None of WA's drawing functions is hooked any more.
 
 For other modules: `wkMapZoom_View` (exported) gives the zoom and the camera of the frame being drawn, so that a
-module that draws on the map (wkSpeedometer's line) knows where a map point is on the screen.
+module that draws on the map (wkSpeedometer's line) knows where a map point is on the screen. `wkModSettings` and
+`wkModSettingsChanged` (exported) tell wkModMenu what the settings are and re-read the ini after a change.
 
 ## Building
 
