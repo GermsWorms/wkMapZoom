@@ -20,7 +20,16 @@ int present_live(void);
  * device (stuck 0), or once every 3 s while WA's Reset of its device keeps failing (stuck 1); back: the device is there
  * again after it was gone */
 void present_on_gone(void (*gone)(int stuck), void (*back)(void));
-/* the module's own system-memory surface released (before WA's display is set up again) */
+/* a small picture (premultiplied A8R8G8B8, w x h) over WA's own frame at (x, y): the next "show frame" is WA's, then the
+ * picture is blended onto the back buffer there (for frames WA draws itself; a true-colour frame has its own). The
+ * picture must stay as it is until then; argb NULL: none after all */
+void present_overlay(const uint32_t *argb, int x, int y, int w, int h);
+/* present_overlay can be used (true colour is live and no overlay has failed) */
+int present_overlay_live(void);
+/* test mode: every `every`-th overlay frame the back buffer is read back and compared with what it should hold; save
+ * (NULL: none) is given the first few pictures */
+void present_test_overlay(int every, void (*save)(const char *name, int w, int h, const uint32_t *px));
+/* the module's own system-memory surfaces released (before WA's display is set up again) */
 void present_forget(void);
 /* test mode: the next `frames` frames are shown as if WA had no device (skipped) */
 void present_test_gone(int frames);

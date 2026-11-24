@@ -57,7 +57,9 @@
  * is no monitor mode asked for at 1160 (fullscreen: its rollback), WKMAPZOOM_TEST_CHAT=1 chat lines before and after
  * the switch with the chat's layout checked (=off: the chat's re-layout off, to see the old way);
  * a movement line's first two showings are saved too, and the speedometer at the first three moments over 700 px/s;
- * WKMAPZOOM_TEST_DUMPAT=700,1200 saves those frames (at-<frame>) with where the turn's worm is on the screen.
+ * WKMAPZOOM_TEST_DUMPAT=700,1200 saves those frames (at-<frame>) with where the turn's worm is on the screen;
+ * WKMAPZOOM_TEST_RENDERER=3 another of WA's renderers (3 and 4: Direct3D 9). Every 150th frame with the speedometer over
+ * WA's own frame is read back from the back buffer and compared (present.c).
  * MinHook (third_party/minhook) is BSD licensed. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -267,7 +269,7 @@ static int turn_key = -1, track_key = -1, track_turn = -1;   /* the turn's worm 
                                                                 and which turn's the track is */
 /* a picture over the true-colour frame (compose blends it in: premultiplied A8R8G8B8, ov_w x ov_h at ov_x0, ov_y0) */
 static const uint32_t *ov_img;
-static int ov_on, ov_x0, ov_y0, ov_w, ov_h;
+static int ov_on, ov_x0, ov_y0, ov_w, ov_h, ov_native;   /* (ov_native: over WA's own frame this time) */
 static uint8_t lut12[4096];             /* the palette's nearest colour for each 4-bit R, G, B (the speedometer's) */
 static int lut12_ok;
 static int team_flags[TRAIL_TEAMS], n_team_tasks, n_worm_objs, trail_on = 1, trail_all = 1, trail_show = -1, trail_hl;
@@ -1215,7 +1217,7 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
         spd_ox = FIELD(display, D_ORG); spd_oy = FIELD(display, D_ORG + 4); spd_z = z;
         spd_cam = 1;
     }
-    if ((z == 1.0 && !colour_land && !(trail_visible && trail_show >= 0 && trail_hl) && !(spd_will && tc_ok && present_live())) || display != frame_display || !wbuf || !rgb || !n || n > MAX_ENTRIES)
+    if ((z == 1.0 && !colour_land && !(trail_visible && trail_show >= 0 && trail_hl)) || display != frame_display || !wbuf || !rgb || !n || n > MAX_ENTRIES)
         return call_queue(queue, display, camera);
     QueryPerformanceCounter(&t0);
     {   /* the frame grid brought up to date if it describes another frame than the renderer's (as WA's lock would: a
@@ -2212,7 +2214,8 @@ static void blit_badge(const uint32_t *img, int tw, int bw, int bh, int x0, int 
  * WA's wind bar, and above the zoom number when that is there too) or just above the worm's name (WA draws the name and
  * the energy above the worm, zoomed with the map: the picture's bottom SPEEDO_UP map pixels above the worm's middle, as
  * shown, and 2 screen pixels more); made again when what it shows changes; not over WA's Esc menu. In true colour it is
- * blended into the true-colour frame (compose: see-through, smooth); otherwise put into WA's frame in its palette. */
+ * blended into the true-colour frame (compose: see-through, smooth), or over WA's own frame where WA drew it
+ * (present_overlay); otherwise put into WA's frame in its palette. */
 #define SPEEDO_UP 44.0
 static speedo_dial spd_dial;
 static speedo_number spd_numpic;
@@ -2230,7 +2233,8 @@ static void draw_speedo(void *display) {
     const double avg = spd_time > 0.5 ? (spd_dist / spd_time < spd_best ? spd_dist / spd_time : spd_best) : 0.0;
     const int dial = speedo == 1, size = dial ? (fh * 120 / 1080 < 110 ? 110 : fh * 120 / 1080) : (fh * 34 / 1080 < 22 ? 22 : fh * 34 / 1080);
     int w, h, x0, y0, x, y, key[7];
-    ov_on = 0;
+    ov_on = ov_native = 0;
+    present_overlay(NULL, 0, 0, 0, 0);
     if (!spd_will || !frame || fw < 64 || fh < 64) return;
     if (dial) { w = h = size; } else speedo_number_size(size, &w, &h);
     if (GetTickCount() - spd_digits_tick >= 100) { spd_digits = spd_disp; spd_digits_tick = GetTickCount(); }
@@ -2280,6 +2284,12 @@ static void draw_speedo(void *display) {
     if (x0 + w <= 0 || x0 >= fw || y0 + h <= 0 || y0 >= fh) return;
     if (tc.on && tc_ok && present_live()) { /* the true-colour frame: blended in there (compose) */
         ov_img = spd_img; ov_x0 = x0; ov_y0 = y0; ov_w = w; ov_h = h; ov_on = 1;
+        return;
+    }
+    if (!tc.on && tc_ok && present_overlay_live()) {   /* a frame WA drew itself (100%): put over it as it is shown (the
+                                                          map was redrawn by the module for this until 2026-11-23) */
+        present_overlay(spd_img, x0, y0, w, h);
+        ov_img = spd_img; ov_x0 = x0; ov_y0 = y0; ov_w = w; ov_h = h; ov_native = 1;   /* (for the test dumps) */
         return;
     }
     palette_tables(display);                /* WA's own frame: its palette's nearest colours; the shadow darkens */
@@ -2378,6 +2388,15 @@ static void dump_frame(void *display, const char *name) {
     write_bmp(name, w, h, px);
     if (tc.on && compose((uint8_t *)px, w * 4, w, h)) {
         snprintf(tcname, sizeof(tcname), "%s-truecolour", name);
+        write_bmp(tcname, w, h, px);
+    } else if (!tc.on && ov_native) {       /* (WA's own frame with the speedometer over it, as present.c shows it) */
+        for (y = ov_y0 < 0 ? 0 : ov_y0; y < ov_y0 + ov_h && y < h; y++)
+            for (x = ov_x0 < 0 ? 0 : ov_x0; x < ov_x0 + ov_w && x < w; x++) {
+                const uint32_t c = ov_img[(size_t)(y - ov_y0) * ov_w + (x - ov_x0)], na = 255u - (c >> 24), b = px[(size_t)y * w + x];
+                px[(size_t)y * w + x] = (((c >> 16) & 0xff) + ((b >> 16) & 0xff) * na / 255u) << 16 |
+                                        (((c >> 8) & 0xff) + ((b >> 8) & 0xff) * na / 255u) << 8 | ((c & 0xff) + (b & 0xff) * na / 255u);
+            }
+        snprintf(tcname, sizeof(tcname), "%s-overlay", name);
         write_bmp(tcname, w, h, px);
     }
     free(px);
@@ -2983,7 +3002,7 @@ static void install(void) {
         *(int32_t *)VA(OPT_WINDOWED_VA) = test_fullscreen ? 0 : 1;
         *(int32_t *)VA(OPT_DISPLAY_X_VA) = tw; *(int32_t *)VA(OPT_DISPLAY_Y_VA) = th;
         *(int32_t *)VA(OPT_WINDOW_X_VA) = tw; *(int32_t *)VA(OPT_WINDOW_Y_VA) = th;
-        *(int32_t *)VA(OPT_RENDERER_VA) = 4;
+        *(int32_t *)VA(OPT_RENDERER_VA) = GetEnvironmentVariableA("WKMAPZOOM_TEST_RENDERER", res, sizeof(res)) > 0 ? atoi(res) : 4;
         say("test mode: %s %dx%d, scripted zoom, frames to %s", test_fullscreen ? "fullscreen" : "windowed", tw, th, dump_dir);
     }
     say("WA starts at %dx%d, %s, renderer %d (its options as read)", *(int32_t *)VA(OPT_DISPLAY_X_VA), *(int32_t *)VA(OPT_DISPLAY_Y_VA),
@@ -3040,6 +3059,7 @@ static void install(void) {
         }
         if (esc_menu && !escmenu_install(base, say, !test_mode)) esc_menu = 0;
         if (esc_menu) escmenu_set_options(&menu_options);
+        if (test_checks) present_test_overlay(150, write_bmp);
         if (present_ok) present_on_gone(escmenu_recover, escmenu_device_back);   /* (no device: one made between frames) */
         s = MH_EnableHook(MH_ALL_HOOKS);
         if (s == MH_OK && follow_sites_install() < 2) say("the zoomed-in camera follow works at some of WA's calls only");
@@ -3049,7 +3069,7 @@ static void install(void) {
         msg_hook = SetWindowsHookExA(WH_GETMESSAGE, on_message, self, GetCurrentThreadId());
         if (!msg_hook) say("could not watch the mouse wheel (error %lu)", GetLastError());
     }
-    say("wkMapZoom 4.3 beta %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), default zoom %.0f%% (Ctrl + "
+    say("wkMapZoom 4.3 beta 2 %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), default zoom %.0f%% (Ctrl + "
         "middle click%s); true colour %s, full-colour maps %s, Esc menu resolution %s, movement line %s, auto zoom %s",
         installed ? "ready" : "failed", (unsigned)base, 100.0 / cfg.max_out, cfg.max_in * 100.0, zoom_default * 100.0,
         numpad_keys ? ", numpad + / - / *" : "", tc_ok ? "on (Direct3D 9)" : "off", colour_maps ? "on" : "off",

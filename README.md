@@ -8,11 +8,12 @@ size, and a small number (for example `150%`) shows the zoom while you change it
 
 > **Version 4.3 is a beta.** The files in [`release/`](release/) are 4.3 beta: it adds a speedometer, a speed zoom,
 > a default zoom, a movement line coloured by speed, zooming out on fast falls, the Esc menu's options in pages, and
-> zoomed out the camera stays where it is at 100% (it isn't pulled away from the level's edges). It is still being
+> zoomed out the camera stays where it is at 100% (it isn't pulled away from the level's edges). Beta 2 makes it faster:
+> with the speedometer on, the map is no longer drawn again by the module at 100% zoom. It is still being
 > tested. If something goes wrong, the last stable version is **4.2**: its files are in
 > [`release/` at 4.2](https://github.com/GermsWorms/wkMapZoom/tree/cc9b734/release) (put them in the WA folder the
 > same way), and please [open an issue](https://github.com/GermsWorms/wkMapZoom/issues) with the log (see Notes; its
-> first line says "wkMapZoom 4.3 beta").
+> first lines say "wkMapZoom 4.3 beta 2").
 
 ![Auto zoom, the speedometer and the movement line coloured by speed on a rope race map](screenshots/auto-zoom.gif)
 
@@ -53,7 +54,9 @@ Also in the module:
 - **Default zoom** *(4.3 beta)*. The zoom each game starts at; Ctrl + middle click and numpad * go back to it, and the
   wheel stops on it on the way through.
 - **Speed.** The zoomed map is drawn on all of the PC's cores, with SSE2, and the land's zoomed-out copies are made
-  ahead of time in the background, so changing the zoom doesn't stall.
+  ahead of time in the background, so changing the zoom doesn't stall. At exactly 100% WA draws the map itself (unless the
+  movement line or a full-colour map is shown), and *(4.3 beta 2)* the speedometer is just laid over it.
+  [wkFastDraw](https://github.com/GermsWorms/wkFastDraw) makes that part faster still; the two work together.
 - **Auto zoom** (Ctrl + A, the Esc menu, or `AutoZoom=1`): the map zooms on its own to fit the space around your worm.
   Where it opens up it zooms out, already as you head into the open, and where it is tight (a time trial map) it zooms
   in. In an ordinary map it stays at your zoom. It looks at where the walls actually are (thin 1-2 px walls too; blown-up
