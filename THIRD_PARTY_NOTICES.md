@@ -4,11 +4,9 @@ wkMapZoom itself is MIT licensed ([LICENSE](LICENSE)). It contains or is derived
 
 ## wkVista
 
-wkMapZoom's map drawing (`src/raster.c`: the drawing operations and what each does to a pixel), its true-colour output
-(`src/present.c`), its full-colour maps (`src/colourmap.c`) and its Esc menu items (`src/escmenu.c`) are ported to C from
-[wkVista](https://github.com/ropahektic/wkVista) (Rust) and changed: area averaging in RGB, the land's shrunk copies,
-zooming out, a system-memory surface for the true-colour frame. The split of WA's drawing queue into screen and camera
-entries is also wkVista's.
+The split of WA's drawing queue into screen and camera entries, and reading the land from WA's tiles, follow
+[wkVista](https://github.com/ropahektic/wkVista) (Rust). (Up to version 4.3 wkMapZoom's own map drawing, true-colour
+output, full-colour maps and Esc menu items were ported from wkVista too; they are no longer part of it.)
 
 ```
 MIT License
@@ -33,11 +31,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
-## wkRGBA
-
-Loading full-colour maps by handing WA a converted stand-in when it opens the file was first done by
-[wkRGBA](https://github.com/rUNaW4y/wkRGBA) (rUNaW4y), as wkVista credits it. No wkRGBA code is used.
 
 ## MinHook
 
