@@ -1,12 +1,13 @@
-/* wkMapZoom 5: hold Ctrl and turn the mouse wheel (or numpad + / -) to zoom the map in and out in Worms Armageddon 3.8.1
+/* wkMapZoom 6: hold Ctrl and turn the mouse wheel (or numpad + / -) to zoom the map in and out in Worms Armageddon 3.8.1
  * (a WormKit module). An auto zoom (Ctrl + A: out where it opens up, in where it is tight) and a speed zoom (out the
  * faster the worm goes) change the zoom on their own. The HUD, the chat, the Esc menu and the weapon panel stay their
  * normal size; a small "150%" shows while the zoom changes.
  *
- * This module only decides the zoom. The zoomed picture is drawn by wkDirect3D (github.com/GermsWorms/wkDirect3D) on
- * the graphics card. Without wkDirect3D, or with WA on another renderer than Direct3D 9 (shader), the map stays at
- * 100%. (Up to 4.3 the module drew the zoomed map itself, on the CPU; it also had a speedometer and a movement line,
- * which are wkSpeedometer now: github.com/GermsWorms/wkSpeedometer.)
+ * This file decides the zoom. The picture, zoomed or not, is drawn on the graphics card by gpu.c (wkMapZoom 5 needed a
+ * second module for that, wkDirect3D: it is part of this one now). With WA on another renderer than Direct3D 9
+ * (shader), or with GraphicsCard=0, WA draws by itself and the map stays at 100%. (Up to 4.3 the module drew the
+ * zoomed map itself, on the CPU; it also had a speedometer and a movement line, which are wkSpeedometer now:
+ * github.com/GermsWorms/wkSpeedometer.)
  *
  * How it works. Each frame WA's GameRender (00533DC0) has its tasks queue what they draw (the drawing queue, world
  * +0x524) and then draws the queue back to front (RenderDrawingQueue 00542350). Entries of kinds 1, 4 and 7 are placed
@@ -62,7 +63,7 @@
 #include "zoom_math.h"
 #include "zoom_badge.h"
 
-#define VERSION "5.1 beta"
+#define VERSION "6.0 beta"
 
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020a
@@ -151,7 +152,8 @@ static unsigned frames;                 /* GameRenders this game */
 static HHOOK msg_hook;
 static unsigned logged_split;
 
-/* wkDirect3D's part (its exported functions; all NULL without it) */
+/* the graphics-card drawing: gpu.c's functions (or, with an old wkDirect3D.dll still loaded, that module's; all NULL
+ * when neither runs) */
 typedef struct { int size; double zoom; int bx, by, ox, oy, x1, y1, x2, y2, smooth; } wkd3d_view;
 static struct {
     int (__cdecl *api)(void);
@@ -161,6 +163,14 @@ static struct {
     int (__cdecl *overlay)(const uint32_t *, int, int, int, int, int);
 } d3d;
 static int d3d_looked;                  /* (looked for again at the first game frame: it may load after this module) */
+static int gpu_inside;                  /* gpu.c runs (started at load) */
+int gpu_start(HINSTANCE module, const char *ini);
+void gpu_settings_changed(void);
+int __cdecl wkDirect3D_Api(void);
+int __cdecl wkDirect3D_MapMax(int *max_w, int *max_h);
+void *__cdecl wkDirect3D_MapBegin(int stride, int rows, int rw, int rh);
+int __cdecl wkDirect3D_MapEnd(const wkd3d_view *view);
+int __cdecl wkDirect3D_Overlay(const uint32_t *argb, int w, int h, int pitch_bytes, int x, int y);
 static int zoom_ready;                  /* this frame wkDirect3D can draw a zoomed map */
 static unsigned zoomed_frames, refused_frames;
 
@@ -355,7 +365,7 @@ static int fit_size(int w, int h) {
     fit_ok = 1;
     fit_limits();
     say("game %dx%d: map up to %dx%d, zoom %.0f%% .. %.0f%%%s", sw, sh, gw, gh, zoom_lo * 100.0, zoom_hi * 100.0,
-        d3d.begin ? "" : " (no wkDirect3D: no zoom)");
+        d3d.begin ? "" : " (the graphics card drawing does not run: no zoom)");
     return 1;
 }
 
@@ -1085,6 +1095,7 @@ static void draw_readout(void *display) {
     double a = ind_alpha();
     char text[48];
     if (a <= 0.02 || !frame || fw < 64 || fh < 64) return;
+    if (!zoom_ready && !message_on()) return;   /* (no zoom is drawn: no number, only a message) */
     if (message_on()) snprintf(text, sizeof(text), "%s", ind_msg); else snprintf(text, sizeof(text), "%d%%", pct);
     if (strcmp(text, ind_text) || fh != ind_lines || !ind_img) {   /* the picture, made again when its text changes */
         int f;
@@ -1141,18 +1152,26 @@ static void test_script(void) {
 }
 
 /* ---- wkDirect3D ---------------------------------------------------------------------------------------------------- */
+void mz_gpu_log(const char *line) { say("gpu: %s", line); }   /* (gpu.c's log lines) */
+
 static void d3d_find(void) {
     const HMODULE m = GetModuleHandleA("wkDirect3D.dll");
     if (d3d.begin) return;
+    if (gpu_inside) {
+        d3d.api = wkDirect3D_Api; d3d.mapmax = wkDirect3D_MapMax; d3d.begin = wkDirect3D_MapBegin; d3d.end = wkDirect3D_MapEnd;
+        d3d.overlay = wkDirect3D_Overlay;
+        if (fit_ok) fit_limits();
+        return;
+    }
     if (!m) return;
     d3d.api = (int (__cdecl *)(void))(void *)GetProcAddress(m, "wkDirect3D_Api");
-    if (!d3d.api || d3d.api() < 1) { say("wkDirect3D is loaded, but it is an older one without the zoom (0.4 or newer is needed)"); d3d.api = NULL; return; }
+    if (!d3d.api || d3d.api() < 1) { say("wkDirect3D.dll is loaded, but it is an older one without the zoom: delete it (its drawing is part of wkMapZoom now)"); d3d.api = NULL; return; }
     d3d.mapmax = (int (__cdecl *)(int *, int *))(void *)GetProcAddress(m, "wkDirect3D_MapMax");
     d3d.end = (int (__cdecl *)(const wkd3d_view *))(void *)GetProcAddress(m, "wkDirect3D_MapEnd");
     d3d.overlay = (int (__cdecl *)(const uint32_t *, int, int, int, int, int))(void *)GetProcAddress(m, "wkDirect3D_Overlay");
     d3d.begin = (void *(__cdecl *)(int, int, int, int))(void *)GetProcAddress(m, "wkDirect3D_MapBegin");
-    if (!d3d.mapmax || !d3d.end || !d3d.begin) { d3d.begin = NULL; say("wkDirect3D is loaded, but its zoom functions are missing"); return; }
-    say("wkDirect3D found (its interface %d): it draws the zoomed map", d3d.api());
+    if (!d3d.mapmax || !d3d.end || !d3d.begin) { d3d.begin = NULL; say("wkDirect3D.dll is loaded, but its zoom functions are missing"); return; }
+    say("wkDirect3D.dll (the older, separate module) is loaded: it draws the zoomed map. It can be deleted: its drawing is part of wkMapZoom now");
     if (fit_ok) fit_limits();
 }
 
@@ -1172,7 +1191,7 @@ static void __fastcall hook_render(void *runtime) {
     frame_display = NULL;
     frame_zoom = 1.0;
     view_ok = 0;
-    if (!d3d_looked) { d3d_looked = 1; d3d_find(); if (!d3d.begin) say("wkDirect3D is not loaded: the map stays at 100%% (the zoom needs it)"); }
+    if (!d3d_looked) { d3d_looked = 1; d3d_find(); if (!d3d.begin) say("the graphics card drawing does not run (see the lines above): the map stays at 100%%"); }
     if (display && (uintptr_t)VTBL(display) == VA(DISPLAY_VTABLE_VA) && fit_size(FIELD(display, D_W), FIELD(display, D_H))) {
         const int land_changed = land_check(display);
         const DWORD gap = GetTickCount() - live_tick;   /* (since the last game frame: the lobby between games) */
@@ -1279,8 +1298,8 @@ static double default_zoom_now(void) { return zoom_clamp(zoom_default, zoom_lo, 
 
 /* the zoom asked for by a key or the wheel: said when it cannot be had */
 static void ask_zoom(double z, const char *why) {
-    if (!d3d.begin) { show_message("Zoom needs wkDirect3D"); return; }
-    if (!zoom_ready) show_message("Zoom: wkDirect3D is not drawing");
+    if (!d3d.begin) { show_message("Zoom is off (GraphicsCard=0)"); return; }
+    if (!zoom_ready) { show_message("Zoom needs Direct3D 9 (shader)"); return; }   /* (WA's Graphics API; or the frames are WA's own just now) */
     set_goal(z, why);
 }
 
@@ -1298,7 +1317,7 @@ static LRESULT CALLBACK on_message(int code, WPARAM wp, LPARAM lp) {
         } else if ((m->message == WM_KEYDOWN || m->message == WM_SYSKEYDOWN) && key_is(m, key_auto)) {
             if (!(m->lParam & (1 << 30))) {  /* (not the key's repeats) */
                 if (!worms_ok) show_message("Auto zoom: unavailable");
-                else if (!d3d.begin) show_message("Zoom needs wkDirect3D");
+                else if (!d3d.begin) show_message("Zoom is off (GraphicsCard=0)");
                 else set_auto_zoom(!auto_zoom, "its key");
             }
             m->message = WM_NULL;
@@ -1406,6 +1425,7 @@ __declspec(dllexport) const char *__cdecl wkModSettings(void) {
            "file=wkMapZoom.ini\n"
            "section=wkMapZoom\n"
            "live=1\n"
+           "GraphicsCard|The graphics card draws|bool||1|On: the graphics card draws the game's picture, which the zoom needs (WA's Graphics API must be Direct3D 9 (shader)). Off: WA draws by itself, as without the module, and the map stays at 100%. Started with it off, WA has to be started again to switch it on.\n"
            "AutoZoom|Auto zoom|bool||0|The map zooms on its own to fit the space around your worm: out where it opens up, in where it is tight. Ctrl + A switches it too.\n"
            "AutoZoomMin|Auto zoom: out to|pct|0.25:1:0.05|0.35|The furthest the auto zoom and the speed zoom go out, as a share of your own zoom. 100% = never out.\n"
            "AutoZoomMax|Auto zoom: in to|pct|1:3:0.25|1.5|The furthest the auto zoom goes in. 100% = never in.\n"
@@ -1431,6 +1451,7 @@ __declspec(dllexport) void __cdecl wkModSettingsChanged(void) {
     const double was_default = zoom_default, was_out = cfg.max_out, was_in = cfg.max_in;
     if (!exe_path[0]) return;
     read_settings(exe_path);
+    gpu_settings_changed();
     if (cfg.max_out != was_out || cfg.max_in != was_in) fit_ok = 0;   /* (the zoom range: worked out again at the next frame) */
     if (zoom_default != was_default) set_goal(zoom_default, "its default changed in the Mods menu");
     ind_changed = GetTickCount();
@@ -1549,9 +1570,20 @@ static void install(void) {
         if (stale)
             say("%u of WA's functions still jump into a module that is no longer loaded (an earlier copy of wkMapZoom, "
                 "unloaded?): WA will crash there -- restart WA, and keep one copy of wkMapZoom", stale);
-        else
-            say("another module hooks WA's drawing queue or camera too (another copy of wkMapZoom, wkVista or WormForge's zoom?): not "
-                "installed -- use one zoom module, and one copy of it, at a time");
+        else {
+            /* The zoom needs those functions to itself. The graphics-card drawing does not (it goes in through WA's
+             * function tables when the first game is on the screen), so it still runs: the picture at 100%, drawn
+             * faster. A second copy of this module finds the first one's drawing and stays out of that too. */
+            const handle_ex_fn ex = handle_ex();
+            HMODULE me;
+            say("another module hooks WA's drawing queue or camera too (another copy of wkMapZoom, wkVista, wkJellyWorm or "
+                "WormForge's zoom?): the zoom is not installed -- use one zoom module, and one copy of it, at a time");
+            strcpy(exe_path, exe);
+            read_settings(exe);
+            if (ex && ex(0x1 | 0x4, (LPCSTR)(void *)&install, &me)) gpu_inside = gpu_start(self, ini_path);
+            say("wkMapZoom " VERSION ": no zoom in this run of WA; the graphics card drawing: %s",
+                gpu_inside ? "starts with the first game" : "does not run");
+        }
         return;
     }
     strcpy(exe_path, exe);
@@ -1590,7 +1622,8 @@ static void install(void) {
             return;
         }
     }
-    d3d_find();                             /* (wkDirect3D loads before this module; looked for again at the first frame) */
+    gpu_inside = gpu_start(self, ini_path);  /* the graphics-card drawing: started with the first game */
+    d3d_find();                             /* (its functions; or an old wkDirect3D.dll's, which loads before this module) */
     s = MH_Initialize();
     for (i = 0; s == MH_OK && i < sizeof(hooks) / sizeof(hooks[0]); i++)
         if ((s = MH_CreateHook((void *)VA(hooks[i].va), hooks[i].detour, hooks[i].orig)) != MH_OK)
@@ -1623,11 +1656,11 @@ static void install(void) {
         if (!msg_hook) say("could not watch the mouse wheel (error %lu)", GetLastError());
     }
     say("wkMapZoom " VERSION " %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), default zoom %.0f%% (Ctrl + "
-        "middle click%s); auto zoom %s, speed zoom %s; the zoomed map is drawn by wkDirect3D: %s",
+        "middle click%s); auto zoom %s, speed zoom %s; the graphics card drawing: %s",
         installed ? "ready" : "failed", (unsigned)base, 100.0 / cfg.max_out, cfg.max_in * 100.0, zoom_default * 100.0,
         numpad_keys ? ", numpad + / - / *" : "",
         worms_ok ? (auto_zoom ? "on (Ctrl + A switches it)" : "off (Ctrl + A switches it)") : "unavailable",
-        worms_ok ? (speed_zoom ? "on" : "off") : "unavailable", d3d.begin ? "found" : "not loaded yet");
+        worms_ok ? (speed_zoom ? "on" : "off") : "unavailable", gpu_inside ? "starts with the first game" : d3d.begin ? "an old wkDirect3D.dll's" : "does not run");
     {   /* (which file this is, and where it lies: two copies, or one unloaded, show in the log) */
         char me[MAX_PATH] = "";
         GetModuleFileNameA(self, me, sizeof(me));

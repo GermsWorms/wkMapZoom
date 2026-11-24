@@ -24,6 +24,9 @@ $dll = Join-Path $PSScriptRoot 'wkMapZoom.dll'
 if (-not (Test-Path -LiteralPath $dll)) { $dll = Join-Path $PSScriptRoot 'release\wkMapZoom.dll' }
 Copy-Item -LiteralPath $dll -Destination $target -Force
 "installed $target (WA loads it at its next start)"
+if (Test-Path -LiteralPath (Join-Path $Game 'wkDirect3D.dll')) {
+    'Note: wkDirect3D.dll is in the WA folder. wkMapZoom 6 has that drawing built in: you can delete wkDirect3D.dll.'
+}
 $ini = Join-Path $Game 'wkMapZoom.ini'
 if (-not (Test-Path -LiteralPath $ini)) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'wkMapZoom.ini') -Destination $ini }
 $opt = Get-ItemProperty -Path 'HKCU:\Software\Team17SoftwareLTD\WormsArmageddon\Options' -ErrorAction SilentlyContinue

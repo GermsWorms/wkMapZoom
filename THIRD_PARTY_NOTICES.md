@@ -5,8 +5,7 @@ wkMapZoom itself is MIT licensed ([LICENSE](LICENSE)). It contains or is derived
 ## wkVista
 
 The split of WA's drawing queue into screen and camera entries, and reading the land from WA's tiles, follow
-[wkVista](https://github.com/ropahektic/wkVista) (Rust). (Up to version 4.3 wkMapZoom's own map drawing, true-colour
-output, full-colour maps and Esc menu items were ported from wkVista too; they are no longer part of it.)
+[wkVista](https://github.com/ropahektic/wkVista) (Rust).
 
 ```
 MIT License
