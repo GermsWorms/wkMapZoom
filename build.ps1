@@ -15,7 +15,7 @@ if ($Shaders) {
     if ($LASTEXITCODE -ne 0) { throw 'shaders failed' }
     $ErrorActionPreference = 'Stop'
 }
-$tests = @('zoom_math_test', 'zoom_badge_test', 'guard_test')
+$tests = @('zoom_math_test', 'zoom_badge_test', 'camera_glide_test', 'guard_test')
 foreach ($t in $tests) {
     $exe = Join-Path $env:TEMP "wkmapzoom_$t.exe"
     $ErrorActionPreference = 'Continue'

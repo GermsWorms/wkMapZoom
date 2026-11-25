@@ -62,8 +62,9 @@
 #include "image_guard.h"
 #include "zoom_math.h"
 #include "zoom_badge.h"
+#include "camera_glide.h"
 
-#define VERSION "6.1 beta"
+#define VERSION "6.2 beta"
 
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020a
@@ -141,6 +142,8 @@ static zoom_cfg cfg = ZOOM_CFG_DEFAULT;
  * the frame wkDirect3D is asked for is always this big) */
 static int sw, sh, gw, gh, fit_ok;
 static int filter_smooth = 1, numpad_keys = 1;
+static int smooth_camera = 1;          /* the picture drawn with a camera that glides between WA's steps (camera_glide.h) */
+static cam_glide glide;
 static double zoom_now = 1.0, zoom_goal = 1.0, zoom_lo = 1.0, zoom_hi = 1.0;
 static double zoom_default = 1.0;       /* DefaultZoom=: each game starts at it; Ctrl + middle click and numpad * go back
                                            to it (within the zoom range) */
@@ -504,36 +507,108 @@ static int is_screen(uint32_t e) {
     return kind == 1 || kind == 4 || kind == 7;
 }
 
-/* For the log: how the camera moved in each second it moved much (someone looking around). Frames it did not move in,
- * or big single steps, would show as a choppy picture however many frames a second there are. */
-static void camera_note(int cx, int cy) {
+/* For the log: how the camera moved in each second it moved much (someone looking around): WA's own, and the one the
+ * picture was drawn with. Frames it did not move in, or big single steps, show as a choppy picture however many
+ * frames a second there are. */
+static void camera_note(int wx, int wy, int cx, int cy) {
     static LARGE_INTEGER t_last, t_win;
-    static int px, py, have, n, moved, big, dist, lines;
+    static int pwx, pwy, pcx, pcy, have, n, moved, big, dist, moved2, big2, lines;
     static double longest;
     LARGE_INTEGER t;
     double dt;
     int dx, dy, d;
     if (!clock_freq.QuadPart) return;
     QueryPerformanceCounter(&t);
-    if (!have) { have = 1; px = cx; py = cy; t_last = t_win = t; return; }
+    if (!have) { have = 1; pwx = wx; pwy = wy; pcx = cx; pcy = cy; t_last = t_win = t; return; }
     dt = (double)(t.QuadPart - t_last.QuadPart) / (double)clock_freq.QuadPart;
     t_last = t;
     if (dt > longest) longest = dt;
     n++;
-    dx = cx > px ? cx - px : px - cx; dy = cy > py ? cy - py : py - cy; d = dx > dy ? dx : dy;
+    dx = wx > pwx ? wx - pwx : pwx - wx; dy = wy > pwy ? wy - pwy : pwy - wy; d = dx > dy ? dx : dy;
     if (d) { moved++; dist += d; if (d > big) big = d; }
-    px = cx; py = cy;
+    dx = cx > pcx ? cx - pcx : pcx - cx; dy = cy > pcy ? cy - pcy : pcy - cy; d = dx > dy ? dx : dy;
+    if (d) { moved2++; if (d > big2) big2 = d; }
+    pwx = wx; pwy = wy; pcx = cx; pcy = cy;
     if (t.QuadPart - t_win.QuadPart >= clock_freq.QuadPart) {
         if (dist >= 300 && lines < 80) {
             lines++;
-            say("camera: in the last second %d frames (the longest %.1f ms); the camera moved in %d of them, %d px in all, largest step %d px; zoom %.0f%%",
-                n, longest * 1000.0, moved, dist, big, frame_zoom * 100.0);
+            say("camera: in the last second %d frames (the longest %.1f ms); WA moved its camera in %d of them, %d px in all, largest step %d px; "
+                "as drawn it moved in %d, largest step %d px; zoom %.0f%%", n, longest * 1000.0, moved, dist, big, moved2, big2, frame_zoom * 100.0);
         }
-        t_win = t; n = moved = big = dist = 0; longest = 0.0;
+        t_win = t; n = moved = big = dist = moved2 = big2 = 0; longest = 0.0;
     }
 }
 
+/* test mode, WKMAPZOOM_TEST_CAMTRACE=count,startframe: WA's camera and the drawn one (16.16) and the time, frame by
+ * frame, into <dump dir>\camtrace.csv (how even is the motion?) */
+static void camera_trace(const int32_t *wa, const int32_t *drawn) {
+    static struct { double t; int32_t x, y, dx, dy; unsigned f; } *tr;
+    static int n, cap, start, done;
+    LARGE_INTEGER t;
+    if (!test_mode || done) return;
+    if (!cap) {
+        char b[64];
+        cap = -1;
+        if (GetEnvironmentVariableA("WKMAPZOOM_TEST_CAMTRACE", b, sizeof(b)) > 0 && sscanf(b, "%d,%d", &cap, &start) >= 1 && cap > 0)
+            tr = malloc((size_t)cap * sizeof(*tr));
+        if (!tr) cap = -1;
+    }
+    if (cap <= 0 || (int)frames < start) return;
+    QueryPerformanceCounter(&t);
+    tr[n].t = (double)t.QuadPart / (double)clock_freq.QuadPart; tr[n].x = wa[0]; tr[n].y = wa[1]; tr[n].dx = drawn[0]; tr[n].dy = drawn[1];
+    tr[n].f = frames;
+    if (++n == cap) {
+        char path[MAX_PATH + 32];
+        FILE *f;
+        int i;
+        snprintf(path, sizeof(path), "%s\\camtrace.csv", dump_dir);
+        f = fopen(path, "w");
+        if (f) {
+            for (i = 0; i < n; i++) fprintf(f, "%u,%.6f,%d,%d,%d,%d\n", tr[i].f, tr[i].t - tr[0].t, tr[i].x, tr[i].y, tr[i].dx, tr[i].dy);
+            fclose(f);
+        }
+        say("test: camera trace of %d frames written to %s", n, path);
+        done = 1;
+    }
+}
+
+static int queue_inner(uint8_t *queue, void *display, void *camera);
+/* RenderDrawingQueue for the game's display: the picture is drawn with the gliding camera (camera_glide.h). WA's own
+ * camera is put back right after: nothing but this frame's drawing sees the other one. (Test mode,
+ * WKMAPZOOM_TEST_CAMSTEP=n: WA's camera held and let go n times a second first, as it moves while one looks around
+ * with the mouse -- a replay's camera moves in every frame.) */
 int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
+    int32_t *c = (int32_t *)camera, real[2] = {0, 0}, wa[2], drawn[2];
+    int r, mine = 0;
+    if (display == frame_display && c && clock_freq.QuadPart) {
+        static int step_hz = -1;
+        static int32_t held[2];
+        static double held_t;
+        LARGE_INTEGER t;
+        double now;
+        QueryPerformanceCounter(&t);
+        now = (double)t.QuadPart / (double)clock_freq.QuadPart;
+        real[0] = wa[0] = c[0]; real[1] = wa[1] = c[1];
+        if (step_hz < 0) {
+            char b[32];
+            step_hz = test_mode && GetEnvironmentVariableA("WKMAPZOOM_TEST_CAMSTEP", b, sizeof(b)) > 0 ? atoi(b) : 0;
+        }
+        if (step_hz > 0) {
+            if (now - held_t >= 1.0 / step_hz || now < held_t) { held[0] = real[0]; held[1] = real[1]; held_t = now; }
+            wa[0] = held[0]; wa[1] = held[1];
+        }
+        drawn[0] = wa[0]; drawn[1] = wa[1];
+        if (smooth_camera) cam_glide_step(&glide, now, wa[0], wa[1], 0.020, &drawn[0], &drawn[1]);
+        camera_note(wa[0] >> 16, wa[1] >> 16, drawn[0] >> 16, drawn[1] >> 16);
+        camera_trace(wa, drawn);
+        if (drawn[0] != real[0] || drawn[1] != real[1]) { c[0] = drawn[0]; c[1] = drawn[1]; mine = 1; }
+    }
+    r = queue_inner(queue, display, camera);
+    if (mine) { c[0] = real[0]; c[1] = real[1]; }
+    return r;
+}
+
+static int queue_inner(uint8_t *queue, void *display, void *camera) {
     typedef void (__cdecl *qsort_fn)(void *, size_t, size_t, void *);
     view_state wa, world;
     wkd3d_view v;
@@ -547,7 +622,6 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
         view_now.org_x = FIELD(display, D_ORG); view_now.org_y = FIELD(display, D_ORG + 4);
         view_now.cam_x = ((const int32_t *)camera)[0] >> 16; view_now.cam_y = ((const int32_t *)camera)[1] >> 16;
         view_ok = 1;
-        camera_note(view_now.cam_x, view_now.cam_y);
     }
     if (z == 1.0 || display != frame_display || !d3d.begin || !d3d.end || !fit_ok || !n || n > MAX_ENTRIES)
         return call_queue(queue, display, camera);
@@ -1272,6 +1346,7 @@ static void __fastcall hook_render(void *runtime) {
             auto_tn = 0;
             auto_phase = 0;
             auto_acc = 0.0;
+            cam_glide_reset(&glide);
             say("a new game (world %p), zoom %.0f%%", world, zoom_goal * 100.0);
         } else if (land_changed) {          /* the same game, its land made of other tile objects: looked up again */
             say("land: WA's tiles are other objects now (mid-game): looked up again");
@@ -1419,6 +1494,7 @@ static void read_settings(const char *exe) {
         for (i = 0; i < sizeof(places) / sizeof(places[0]); i++) if (!lstrcmpiA(v, places[i])) ind_place = (int)i;
     }
     numpad_keys = ini_flag(ini, "NumpadKeys", 1);
+    smooth_camera = ini_flag(ini, "SmoothCamera", 1);
     {   /* the keys (NumpadKeys=0, an older file's switch: the three zoom keys are none unless named) */
         static const struct { const char *name, *dflt; keybind *to; int numpad; } keys[] = {
             {"ZoomInKey", "Numpad +", &key_in, 1}, {"ZoomOutKey", "Numpad -", &key_out, 1}, {"ZoomResetKey", "Numpad *", &key_reset, 1},
@@ -1495,6 +1571,7 @@ __declspec(dllexport) const char *__cdecl wkModSettings(void) {
            "IndicatorPlace|Zoom number: place|choice|top-right,top-left,top,bottom-right,bottom-left,bottom|top-right|Where the zoom number is shown.\n"
            "Filter|Picture|choice|smooth,nearest|smooth|smooth: each screen pixel is the average of the map pixels it covers. nearest: plain pixel picking.\n"
            "Smooth|Glide to a new zoom|bool||1|On: the zoom glides to its new value. Off: it jumps.\n"
+           "SmoothCamera|Smooth camera|bool||1|While you look around with the mouse, WA moves its camera only 64 times a second, however many frames it draws. On: the picture glides evenly between those steps (it trails the mouse by one step, 16 ms). Off: WA's own camera.\n"
            "Step|Zoom per wheel notch|num|1.05:2:0.05|1.15|How much one notch of the wheel (or one numpad press) zooms.\n"
            "ZoomModifier|Key held with the wheel|choice|ctrl,alt,shift|ctrl|The key you hold while turning the mouse wheel to zoom (and while clicking the middle button to go back to the default zoom).\n"
            "ZoomInKey|Key: zoom in|key||Numpad +|A key that zooms in one step. Click, then press the key (with Ctrl, Alt or Shift if you like). Delete: none.\n"
@@ -1721,11 +1798,11 @@ static void install(void) {
         if (!msg_hook) say("could not watch the mouse wheel (error %lu)", GetLastError());
     }
     say("wkMapZoom " VERSION " %s (base %08x): Ctrl + wheel zooms the map (up to %.0f%% out, %.0f%% in), default zoom %.0f%% (Ctrl + "
-        "middle click%s); auto zoom %s, speed zoom %s; the graphics card drawing: %s",
+        "middle click%s); auto zoom %s, speed zoom %s, smooth camera %s; the graphics card drawing: %s",
         installed ? "ready" : "failed", (unsigned)base, 100.0 / cfg.max_out, cfg.max_in * 100.0, zoom_default * 100.0,
         numpad_keys ? ", numpad + / - / *" : "",
         worms_ok ? (auto_zoom ? "on (Ctrl + A switches it)" : "off (Ctrl + A switches it)") : "unavailable",
-        worms_ok ? (speed_zoom ? "on" : "off") : "unavailable", gpu_inside ? "starts with the first game" : d3d.begin ? "an old wkDirect3D.dll's" : "does not run");
+        worms_ok ? (speed_zoom ? "on" : "off") : "unavailable", smooth_camera ? "on" : "off", gpu_inside ? "starts with the first game" : d3d.begin ? "an old wkDirect3D.dll's" : "does not run");
     {   /* (which file this is, and where it lies: two copies, or one unloaded, show in the log) */
         char me[MAX_PATH] = "";
         GetModuleFileNameA(self, me, sizeof(me));

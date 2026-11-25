@@ -32,6 +32,10 @@ once it has landed. The number top right is the zoom.*
 - **Default zoom** (`DefaultZoom=`): the zoom each game starts at; Ctrl + middle click and numpad * go back to it.
 - **Camera.** Zoomed in, the camera keeps your worm within the part of the map you can see. Zoomed out it stays where
   it is at 100%, so near the level's edges it isn't pulled toward the middle (the area past the edge shows).
+- **Smooth camera.** While you look around with the mouse, WA moves its camera only 64 times a second, however many
+  frames it draws: at a high frame rate the picture stands still for several frames and then jumps, most of all zoomed
+  out, where you look around fast. wkMapZoom draws with a camera that glides evenly between those steps
+  (`SmoothCamera=0` turns it off). It works at 100% zoom too.
 - **Smooth picture.** Each screen pixel is the average of the map pixels it covers, in full colour, so zoomed-out walls
   and edges stay visible and smooth (`Filter=nearest` picks single pixels instead).
 - **A faster game.** At 100% zoom too, the graphics card draws the picture: the same picture as WA's, pixel for pixel,
@@ -128,6 +132,8 @@ Uninstall: delete `wkMapZoom.dll`. To keep the module but have WA draw by itself
   drawing. Keep one zoom module in the WA folder at a time, and one copy of wkMapZoom (renamed copies included).
 - Zoomed in, the camera follows your worm within the part of the map you can see; at 100% and below it follows as
   WA always does.
+- With the smooth camera on, the picture trails the mouse by 16 ms while you look around (one of WA's camera steps).
+  Where you click and aim is WA's own, as ever.
 - In real-time play (wkRealTime), where several worms have the turn at once, there is no auto zoom or speed zoom.
 - WA's own screenshots show the picture as drawn (zoomed too, then in WA's 256 colours), but not what other modules
   lay over it in full colour (wkSpeedometer's dial).
@@ -151,6 +157,7 @@ Uninstall: delete `wkMapZoom.dll`. To keep the module but have WA draw by itself
 | `MaxIn` | `8` | how far in: 8 = 800% |
 | `Step` | `1.15` | zoom per wheel notch or numpad press |
 | `Smooth` | `1` | glide to the new zoom (0 = jump) |
+| `SmoothCamera` | `1` | 1 = the picture glides evenly while you look around with the mouse (WA itself moves the camera 64 times a second there); 0 = WA's own camera |
 | `Filter` | `smooth` | `smooth`: each screen pixel is the average of the map pixels it covers; `nearest`: plain pixel picking |
 | `Indicator` | `zooming` | the zoom number: `zooming` (shown while zooming, then fades), `always` (stays while not at the default zoom), `off` |
 | `IndicatorPlace` | `top-right` | or `top-left`, `top`, `bottom-right`, `bottom-left`, `bottom` |
@@ -187,6 +194,14 @@ exactly as it draws an ordinary frame, into a picture of its own. That picture i
 each screen pixel the average of the map pixels it covers, the display gets its own size back, and WA draws the HUD
 over it as usual. WA draws its deep water and its sky only between the left and right ends of its world, which the
 camera never shows past at 100%; zoomed out it does, so those fills are drawn across the whole view.
+
+**The smooth camera** ([`src/camera_glide.h`](src/camera_glide.h)). WA eases its mouse camera with a clock that ticks 64
+times a second, so that camera moves in 64 frames of a second and stands still in the others. Each frame wkMapZoom
+looks at WA's camera: when it has moved, the drawn camera goes from where it is to the new place at an even speed, in
+the time WA's steps are apart (measured as they come, 20 ms at most), and so arrives as the next step is due. It
+trails WA's camera by one step, 16 ms, while that moves, and is the same when it rests. When WA's camera moves in
+every frame anyway (it follows a worm), the drawn camera is WA's own. WA draws the frame with that camera and gets its
+own back right after, so nothing but the picture sees it.
 
 **The camera.** Zoomed in, WA's camera clamp is given the size the zoomed view sees, so the camera reaches the level's
 edges, and its camera follow the size of what you see, so it keeps up with the worm; zoomed out both are left as WA
