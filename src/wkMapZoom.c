@@ -63,7 +63,7 @@
 #include "zoom_math.h"
 #include "zoom_badge.h"
 
-#define VERSION "6.0 beta"
+#define VERSION "6.1 beta"
 
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020a
@@ -82,6 +82,7 @@
 #define GAME_RENDER_VA 0x533dc0u
 #define QUEUE_VA 0x542350u
 #define CLAMP_VA 0x542f10u
+#define FILL_VA 0x56b810u               /* the display's rectangle fill (ECX display; x1, y1, x2, y2 from its origin, colour; ret 0x14) */
 #define FOLLOW_VA 0x542f70u
 #define TEAM_HANDLER_VA 0x557310u       /* a team task's message handler (thiscall, ECX the task) */
 #define PHYSICS_VA 0x4fcdf0u            /* an object's physics step (its manager, the object; every object, every step) */
@@ -466,6 +467,28 @@ static void land_setup(void *display) {
     say("land %dx%d in %d tiles of %dx%d (see-through %d)", w, h, n, tw, th, land.key);
 }
 
+/* ---- fills as wide as the level: across the whole zoomed view --------------------------------------------------- */
+/* WA's deep water, the strips of water at its surface and the sky above its gradient are fills between the world's left
+ * and right bounds (game +0x779C / +0x77A0: some way past the level's sides). At 100% the camera never shows what is
+ * past them. Zoomed out it does: the water and the sky ended there, and beyond was nothing (the owner's screenshots,
+ * 2026-11-24; a friend's, 2026-11-22). While the map entries of a zoomed frame are drawn, a fill that covers at least
+ * the level's own columns is drawn from the view's left edge to its right. (Only fills: the land and everything else
+ * stay as WA puts them. The waves and the far sea are rows WA tiles across the display's clip: they reach by themselves.) */
+static void (__fastcall *original_fill)(void *, int, int, int, int, int, int);
+static int wide_on, wide_l = 1, wide_r, wide_rw;   /* the level's columns in map coordinates (none: wide_l > wide_r), the map's width */
+static unsigned widened;
+static void __fastcall hook_fill(void *d, int edx, int x1, int y1, int x2, int y2, int colour) {
+    if (wide_on && d == frame_display && wide_l < wide_r && y2 - y1 >= 2) {
+        const int ox = FIELD(d, D_ORG), l = x1 + ox, r = x2 + ox;
+        if (l <= wide_l && r >= wide_r && (l > 0 || r < wide_rw)) {
+            if (test_mode && widened < 4) say("test: fill %d..%d x %d..%d (the level %d..%d) drawn across the map (0..%d)", l, r, y1, y2, wide_l, wide_r, wide_rw);
+            widened++;
+            x1 = -ox; x2 = wide_rw - ox;
+        }
+    }
+    original_fill(d, edx, x1, y1, x2, y2, colour);
+}
+
 /* ---- the drawing queue: the map through wkDirect3D at the zoom, then the HUD ------------------------------------- */
 /* Zoomed: every map entry (back to front) drawn by WA into the map frame wkDirect3D hands out, that put on the screen
  * at the zoom, then every HUD entry (back to front) as WA draws it. (WA's own order puts the HUD in front of the map; an
@@ -479,6 +502,35 @@ static int draw_entry(uint8_t *queue, void *display, void *camera, uint32_t e) {
 static int is_screen(uint32_t e) {
     int32_t kind = *(int32_t *)(uintptr_t)e;
     return kind == 1 || kind == 4 || kind == 7;
+}
+
+/* For the log: how the camera moved in each second it moved much (someone looking around). Frames it did not move in,
+ * or big single steps, would show as a choppy picture however many frames a second there are. */
+static void camera_note(int cx, int cy) {
+    static LARGE_INTEGER t_last, t_win;
+    static int px, py, have, n, moved, big, dist, lines;
+    static double longest;
+    LARGE_INTEGER t;
+    double dt;
+    int dx, dy, d;
+    if (!clock_freq.QuadPart) return;
+    QueryPerformanceCounter(&t);
+    if (!have) { have = 1; px = cx; py = cy; t_last = t_win = t; return; }
+    dt = (double)(t.QuadPart - t_last.QuadPart) / (double)clock_freq.QuadPart;
+    t_last = t;
+    if (dt > longest) longest = dt;
+    n++;
+    dx = cx > px ? cx - px : px - cx; dy = cy > py ? cy - py : py - cy; d = dx > dy ? dx : dy;
+    if (d) { moved++; dist += d; if (d > big) big = d; }
+    px = cx; py = cy;
+    if (t.QuadPart - t_win.QuadPart >= clock_freq.QuadPart) {
+        if (dist >= 300 && lines < 80) {
+            lines++;
+            say("camera: in the last second %d frames (the longest %.1f ms); the camera moved in %d of them, %d px in all, largest step %d px; zoom %.0f%%",
+                n, longest * 1000.0, moved, dist, big, frame_zoom * 100.0);
+        }
+        t_win = t; n = moved = big = dist = 0; longest = 0.0;
+    }
 }
 
 int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
@@ -495,6 +547,7 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
         view_now.org_x = FIELD(display, D_ORG); view_now.org_y = FIELD(display, D_ORG + 4);
         view_now.cam_x = ((const int32_t *)camera)[0] >> 16; view_now.cam_y = ((const int32_t *)camera)[1] >> 16;
         view_ok = 1;
+        camera_note(view_now.cam_x, view_now.cam_y);
     }
     if (z == 1.0 || display != frame_display || !d3d.begin || !d3d.end || !fit_ok || !n || n > MAX_ENTRIES)
         return call_queue(queue, display, camera);
@@ -535,8 +588,12 @@ int __cdecl queue_hook(uint8_t *queue, void *display, void *camera) {
     memcpy(world.gclip, world.clip, sizeof(world.clip));
     world.fb = (int32_t)(uintptr_t)map; world.fbw = gw; world.fbh = gh;   /* (rows gw apart) */
     view_load(display, &world);
+    if (original_fill && camera && land_ok && land.w > 0) {   /* (WA's camera transform: map = world - camera + bx, whole pixels) */
+        wide_l = bx - (((const int32_t *)camera)[0] >> 16); wide_r = wide_l + land.w; wide_rw = rw; wide_on = 1;
+    }
     for (i = (int)n - 1; i >= 0; i--)       /* the map, back to front */
         if (!is_screen(queue_list[i])) { last = draw_entry(queue, display, camera, queue_list[i]); nworld++; }
+    wide_on = 0;
     view_load(display, &wa);
     memset(&v, 0, sizeof(v));
     v.size = (int)sizeof(v); v.zoom = z; v.bx = bx; v.by = by; v.ox = wa.org[0]; v.oy = wa.org[1];
@@ -1645,6 +1702,14 @@ static void install(void) {
                 /* (another module's hook already there: ours chains onto it, so it is kept loaded) */
                 if (*tp == 0xe9) pin_owner(tp + 5 + *(const int32_t *)(tp + 1), "the team tasks' hook");
                 if (*pp == 0xe9) pin_owner(pp + 5 + *(const int32_t *)(pp + 1), "the physics step's hook");
+            }
+        }
+        {                                   /* (the fills across the view: only on WA's own code; without it the zoom still works) */
+            static const unsigned char fill_bytes[] = {0x8b, 0x81, 0x60, 0x35, 0x00, 0x00, 0x01, 0x44, 0x24, 0x04};
+            if (memcmp((void *)VA(FILL_VA), fill_bytes, sizeof(fill_bytes)) ||
+                MH_CreateHook((void *)VA(FILL_VA), (void *)hook_fill, (void **)&original_fill) != MH_OK) {
+                original_fill = NULL;
+                say("the display's fill (0056B810) is not WA's own code (another module's hook?): zoomed far out, the water and the sky end where WA ends them");
             }
         }
         s = MH_EnableHook(MH_ALL_HOOKS);

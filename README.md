@@ -185,7 +185,8 @@ that it is as big as the area the zoomed view needs, and has WA draw the map ent
 WA's own code works out and draws everything that is to be seen, at WA's own scale, and the graphics card draws it
 exactly as it draws an ordinary frame, into a picture of its own. That picture is then put on the screen at the zoom,
 each screen pixel the average of the map pixels it covers, the display gets its own size back, and WA draws the HUD
-over it as usual.
+over it as usual. WA draws its deep water and its sky only between the left and right ends of its world, which the
+camera never shows past at 100%; zoomed out it does, so those fills are drawn across the whole view.
 
 **The camera.** Zoomed in, WA's camera clamp is given the size the zoomed view sees, so the camera reaches the level's
 edges, and its camera follow the size of what you see, so it keeps up with the worm; zoomed out both are left as WA
@@ -202,8 +203,8 @@ pump the zoom).
 **Hooks** (WA 3.8.1, checked by the SHA-256 of `WA.exe`, or of its code section with its sections where 3.8.1 has
 them, and the original bytes at each hook point): `00533DC0` GameRender, `00542350` RenderDrawingQueue, `00542F10`
 ClampCameraToBounds, the camera follow `00542F70` at its two calls (`00554636`, `0055A4B8`), `00557310` a team task's
-message handler and `004FCDF0` an object's physics step (whose turn it is and where its worm is: both only look), and
-a `WH_GETMESSAGE` hook on WA's thread for the wheel and the keys. The drawing: entries of WA's function tables (the
+message handler and `004FCDF0` an object's physics step (whose turn it is and where its worm is: both only look),
+`0056B810` the display's rectangle fill (the water and the sky across the view), and a `WH_GETMESSAGE` hook on WA's thread for the wheel and the keys. The drawing: entries of WA's function tables (the
 software RenderContext `00662EC8`, the display `0066A218`, the Direct3D 9 shader backend `006767F8`, the surface class
 `00677570`) and the four calls of the sprite blit `004F6910` in the display's code, put in when the first game is on
 the screen.

@@ -496,6 +496,22 @@ static int make_objects(IDirect3DDevice9 *dev, int w, int h) {
     if (opt_check) IDirect3DDevice9_CreateOffscreenPlainSurface(dev, w, h, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, &chk_surf, NULL);
     say("Direct3D objects made for %dx%d (pixel shader %lu.%lu%s, texture pages of %d)", w, h, (caps.PixelShaderVersion >> 8) & 0xff,
         caps.PixelShaderVersion & 0xff, sh_avg[4] ? ", zoom shaders" : "", page_size);
+    {   /* (what the screen runs at while WA has it: a fullscreen game need not use the desktop's rate) */
+        D3DDISPLAYMODE dm;
+        memset(&dm, 0, sizeof(dm));
+        IDirect3DSwapChain9 *sc = NULL;
+        D3DPRESENT_PARAMETERS pp;
+        memset(&pp, 0, sizeof(pp));
+        if (!FAILED(IDirect3DDevice9_GetSwapChain(dev, 0, &sc)) && sc) {
+            IDirect3DSwapChain9_GetPresentParameters(sc, &pp);
+            IDirect3DSwapChain9_Release(sc);
+        }
+        if (!FAILED(IDirect3DDevice9_GetDisplayMode(dev, 0, &dm)))
+            say("the display: %ux%u at %u Hz, %s, vsync %s (present interval %08lx, asked refresh rate %u, %u back buffer(s), swap effect %d)",
+                dm.Width, dm.Height, dm.RefreshRate, pp.Windowed ? "in a window" : "fullscreen",
+                pp.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE ? "off" : "on", (unsigned long)pp.PresentationInterval,
+                pp.FullScreen_RefreshRateInHz, pp.BackBufferCount, (int)pp.SwapEffect);
+    }
     return 1;
 }
 
@@ -830,109 +846,120 @@ static gop *layer_op(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, const RECT *
     return o;
 }
 
-/* What WA drew into the frame since the last time: uploaded and noted as a layer over what the GPU has drawn so far,
- * and the frame made "nothing" again. Pages the write watch names -> rows -> the smallest rectangles with anything in
- * them. (The write watch is reset only now and then: a page written once is looked at each time until then, which
- * costs less than the page fault a freshly watched page takes at its first write.) */
-static void take_layer(IDirect3DDevice9 *dev, int last) {
-    ULONG_PTR n = ww_cap, i, j;
-    DWORD gran = 0;
+/* Pieces of the frame with something in them: uploaded and noted as a layer over what the GPU has drawn so far, and the
+ * frame made "nothing" there again */
+static void put_pieces(IDirect3DDevice9 *dev, RECT *rects, int nr) {
     D3DLOCKED_RECT lr;
-    RECT rects[256];
-    int nr = 0, k, y;
-    const LONGLONG t0 = now();
     LONGLONG t1, t2;
+    int k, y;
+    if (!nr || frame_abort) return;
+    draw_ops(dev);                          /* (what the GPU drew before WA drew this lies under it) */
+    t1 = now();
+    if (!opt_ov || zm_on) {                 /* a frame-sized texture, each piece updated in its own place */
+        if (FAILED(IDirect3DTexture9_LockRect(ov_sys, 0, &lr, NULL, D3DLOCK_NO_DIRTY_UPDATE))) { frame_abort = 1; return; }
+        for (k = 0; k < nr; k++) {
+            const int w = rects[k].right - rects[k].left;
+            for (y = rects[k].top; y < rects[k].bottom; y++) {
+                uint8_t *row = my_frame + (size_t)y * my_w + rects[k].left;
+                memcpy((uint8_t *)lr.pBits + (size_t)y * lr.Pitch + rects[k].left, row, w);
+                if (ref && !opt_strict) ref_over(row, y, rects[k].left, w);
+                memset(row, sent, w);
+            }
+            st.ov_bytes += (unsigned)(w * (rects[k].bottom - rects[k].top));
+            /* (only the screen's own layers say "this picture came whole from elsewhere": a zoomed map's are in map
+             * pixels, and a long rope's rectangle there is no sign of another module) */
+            if (!zm_on) frame_layer_px += (unsigned)(w * (rects[k].bottom - rects[k].top));
+        }
+        IDirect3DTexture9_UnlockRect(ov_sys, 0);
+        t2 = now();
+        st.t_copy += t2 - t1;
+        for (k = 0; k < nr; k++) {
+            POINT pt;
+            pt.x = rects[k].left; pt.y = rects[k].top;
+            if (FAILED(IDirect3DDevice9_UpdateSurface(dev, ov_sys_lvl, &rects[k], ov_lvl, &pt))) { frame_abort = 1; break; }
+            layer_op(dev, ov_tex, &rects[k], rects[k].left, rects[k].top, my_w, my_h);
+        }
+        st.t_up += now() - t2;
+        draw_ops(dev);                      /* (drawn now: the next layer uses the same texture) */
+    } else {                                /* a strip refilled from its top: the pieces one under the other */
+        k = 0;
+        while (k < nr && !frame_abort) {
+            int ay = 0;
+            if (FAILED(IDirect3DTexture9_LockRect(ov_dyn, 0, &lr, NULL, D3DLOCK_DISCARD))) { frame_abort = 1; break; }
+            while (k < nr) {
+                RECT r = rects[k];
+                const int w = r.right - r.left;
+                if (r.bottom - r.top > ov_dyn_h - ay) {
+                    if (ay && r.bottom - r.top <= ov_dyn_h) break;   /* (fits a fresh strip whole) */
+                    if (ay == ov_dyn_h) break;
+                    r.bottom = r.top + ov_dyn_h - ay;                /* (too tall for any: in parts) */
+                    rects[k].top = r.bottom;
+                } else k++;
+                for (y = r.top; y < r.bottom; y++) {
+                    uint8_t *row = my_frame + (size_t)y * my_w + r.left;
+                    memcpy((uint8_t *)lr.pBits + (size_t)(ay + y - r.top) * lr.Pitch + r.left, row, w);
+                    if (ref && !opt_strict) ref_over(row, y, r.left, w);
+                    memset(row, sent, w);
+                }
+                st.ov_bytes += (unsigned)(w * (r.bottom - r.top));
+                frame_layer_px += (unsigned)(w * (r.bottom - r.top));
+                layer_op(dev, ov_dyn, &r, r.left, ay, my_w, ov_dyn_h);
+                ay += r.bottom - r.top;
+            }
+            IDirect3DTexture9_UnlockRect(ov_dyn, 0);
+            draw_ops(dev);                  /* (drawn now: the strip is filled anew next) */
+        }
+        st.t_copy += now() - t1;
+    }
+    st.runs += (unsigned)nr;
+}
+
+/* What WA drew into the frame since the last time: uploaded and noted as a layer over what the GPU has drawn so far,
+ * and the frame made "nothing" again. Pages the write watch names (in rising order) -> the rows each has a part of ->
+ * the smallest rectangles with anything in them: a piece ends after 9 empty rows, or at 64 rows (a long slanted line
+ * is then a chain of small rectangles, not one big one). Rows in no written page are empty: they count as such, so a
+ * piece goes on across them -- in a frame wider than a page (a zoomed map's) the pages of one tall, thin thing do not
+ * touch each other. (The write watch is reset only now and then: a page written once is looked at each time until
+ * then, which costs less than the page fault a freshly watched page takes at its first write.) */
+static void take_layer(IDirect3DDevice9 *dev, int last) {
+    ULONG_PTR n = ww_cap, i;
+    DWORD gran = 0;
+    RECT rects[256];
+    int nr = 0, y, done = 0, x0 = my_w, x1 = -1, ya = -1, yb = -1;
+    const LONGLONG t0 = now();
+    LONGLONG t1;
     if (GetWriteWatch(0, my_frame, my_size, ww_addr, &n, &gran)) { frame_abort = 1; return; }
     t1 = now();
     st.t_ww += t1 - t0;
     st.pages += (unsigned)n;
-    for (i = 0; i < n && !frame_abort; i = j) {
-        size_t b0 = (size_t)((uint8_t *)ww_addr[i] - my_frame), b1;
-        int y0, y1, x0 = my_w, x1 = -1, ya = -1, yb = -1;
-        for (j = i + 1; j < n && (uint8_t *)ww_addr[j] == (uint8_t *)ww_addr[j - 1] + 4096; j++) ;
-        b1 = (size_t)((uint8_t *)ww_addr[j - 1] - my_frame) + 4096;
-        y0 = (int)(b0 / (size_t)my_w);
-        y1 = (int)((b1 + (size_t)my_w - 1) / (size_t)my_w);
+#define PIECE_END() do { \
+        if (nr == 256) { put_pieces(dev, rects, nr); nr = 0; }   /* (a layer holds any number: in lots of 256) */ \
+        rects[nr].left = x0; rects[nr].right = x1 + 1; rects[nr].top = ya; rects[nr].bottom = yb + 1; nr++; \
+        x0 = my_w; x1 = -1; ya = yb = -1; \
+    } while (0)
+    for (i = 0; i < n && !frame_abort; i++) {
+        const size_t b0 = (size_t)((uint8_t *)ww_addr[i] - my_frame);
+        int y0 = (int)(b0 / (size_t)my_w), y1 = (int)((b0 + 4096 + (size_t)my_w - 1) / (size_t)my_w);
         if (y1 > my_h) y1 = my_h;
-        if (nr && y0 < rects[nr - 1].bottom) y0 = rects[nr - 1].bottom;   /* (rows the run before took) */
-        for (y = y0; y <= y1; y++) {
+        if (y0 < done) y0 = done;           /* (rows an earlier page had a part of are looked at already) */
+        for (y = y0; y < y1; y++) {
             const uint8_t *row = my_frame + (size_t)y * my_w;
-            const int a = y < y1 ? first_set(row, my_w) : -1;
-            if (a < 0) {                    /* empty rows (or the run's end) end a piece: pieces far apart stay small */
-                if (ya >= 0 && (y - yb > 8 || y == y1)) {
-                    if (nr == 256) { frame_abort = 1; break; }
-                    rects[nr].left = x0; rects[nr].right = x1 + 1; rects[nr].top = ya; rects[nr].bottom = yb + 1;
-                    nr++;
-                    x0 = my_w; x1 = -1; ya = yb = -1;
-                }
-                continue;
-            }
-            { const int b = last_set(row, my_w); if (a < x0) x0 = a; if (b > x1) x1 = b; }
+            const int a = first_set(row, my_w);
+            int b;
+            if (a < 0) continue;
+            if (ya >= 0 && (y - yb > 9 || yb - ya >= 63)) PIECE_END();
+            b = last_set(row, my_w);
+            if (a < x0) x0 = a;
+            if (b > x1) x1 = b;
             if (ya < 0) ya = y;
             yb = y;
         }
+        if (y1 > done) done = y1;
     }
-    t2 = now();
-    st.t_scan += t2 - t1;
-    if (nr && !frame_abort) {
-        draw_ops(dev);                      /* (what the GPU drew before WA drew this lies under it) */
-        t1 = now();
-        if (!opt_ov || zm_on) {             /* a frame-sized texture, each piece updated in its own place */
-            if (FAILED(IDirect3DTexture9_LockRect(ov_sys, 0, &lr, NULL, D3DLOCK_NO_DIRTY_UPDATE))) { frame_abort = 1; return; }
-            for (k = 0; k < nr; k++) {
-                const int w = rects[k].right - rects[k].left;
-                for (y = rects[k].top; y < rects[k].bottom; y++) {
-                    uint8_t *row = my_frame + (size_t)y * my_w + rects[k].left;
-                    memcpy((uint8_t *)lr.pBits + (size_t)y * lr.Pitch + rects[k].left, row, w);
-                    if (ref && !opt_strict) ref_over(row, y, rects[k].left, w);
-                    memset(row, sent, w);
-                }
-                st.ov_bytes += (unsigned)(w * (rects[k].bottom - rects[k].top));
-                frame_layer_px += (unsigned)(w * (rects[k].bottom - rects[k].top));
-            }
-            IDirect3DTexture9_UnlockRect(ov_sys, 0);
-            t2 = now();
-            st.t_copy += t2 - t1;
-            for (k = 0; k < nr; k++) {
-                POINT pt;
-                pt.x = rects[k].left; pt.y = rects[k].top;
-                if (FAILED(IDirect3DDevice9_UpdateSurface(dev, ov_sys_lvl, &rects[k], ov_lvl, &pt))) { frame_abort = 1; break; }
-                layer_op(dev, ov_tex, &rects[k], rects[k].left, rects[k].top, my_w, my_h);
-            }
-            st.t_up += now() - t2;
-            draw_ops(dev);                  /* (drawn now: the next layer uses the same texture) */
-        } else {                            /* a strip refilled from its top: the pieces one under the other */
-            k = 0;
-            while (k < nr && !frame_abort) {
-                int ay = 0;
-                if (FAILED(IDirect3DTexture9_LockRect(ov_dyn, 0, &lr, NULL, D3DLOCK_DISCARD))) { frame_abort = 1; break; }
-                while (k < nr) {
-                    RECT r = rects[k];
-                    const int w = r.right - r.left;
-                    if (r.bottom - r.top > ov_dyn_h - ay) {
-                        if (ay && r.bottom - r.top <= ov_dyn_h) break;   /* (fits a fresh strip whole) */
-                        if (ay == ov_dyn_h) break;
-                        r.bottom = r.top + ov_dyn_h - ay;                /* (too tall for any: in parts) */
-                        rects[k].top = r.bottom;
-                    } else k++;
-                    for (y = r.top; y < r.bottom; y++) {
-                        uint8_t *row = my_frame + (size_t)y * my_w + r.left;
-                        memcpy((uint8_t *)lr.pBits + (size_t)(ay + y - r.top) * lr.Pitch + r.left, row, w);
-                        if (ref && !opt_strict) ref_over(row, y, r.left, w);
-                        memset(row, sent, w);
-                    }
-                    st.ov_bytes += (unsigned)(w * (r.bottom - r.top));
-                    frame_layer_px += (unsigned)(w * (r.bottom - r.top));
-                    layer_op(dev, ov_dyn, &r, r.left, ay, my_w, ov_dyn_h);
-                    ay += r.bottom - r.top;
-                }
-                IDirect3DTexture9_UnlockRect(ov_dyn, 0);
-                draw_ops(dev);              /* (drawn now: the strip is filled anew next) */
-            }
-            st.t_copy += now() - t1;
-        }
-        st.runs += (unsigned)nr;
-    }
+    if (ya >= 0 && !frame_abort) PIECE_END();
+#undef PIECE_END
+    st.t_scan += now() - t1;
+    put_pieces(dev, rects, nr);
     if (last && ++ww_age >= opt_reset) { ResetWriteWatch(my_frame, my_size); ww_age = 0; }
     st.flushes++;
     st.t_flush += now() - t0;
@@ -1729,6 +1756,22 @@ WKD3D_API int __cdecl wkDirect3D_MapMax(int *max_w, int *max_h) {
     return 1;
 }
 
+/* The map's picture starts empty each frame (index 0, as WA's own frame is black where nothing is drawn). Past the
+ * world's edges WA draws no sky and no water, so without this the picture of earlier frames stayed there: waves and sea
+ * of other zooms and camera places, heaped up (the owner's "cursed" edges, 2026-11-24). The check's own picture too. */
+static void map_clear(IDirect3DDevice9 *dev, int rw, int rh) {
+    IDirect3DSurface9 *bb = NULL;
+    D3DRECT r;
+    int y;
+    r.x1 = 0; r.y1 = 0; r.x2 = rw; r.y2 = rh;
+    set_states(dev);
+    IDirect3DDevice9_GetRenderTarget(dev, 0, &bb);
+    IDirect3DDevice9_SetRenderTarget(dev, 0, rt_lvl);
+    IDirect3DDevice9_Clear(dev, 1, &r, D3DCLEAR_TARGET, 0, 1.0f, 0);
+    if (bb) { IDirect3DDevice9_SetRenderTarget(dev, 0, bb); IDirect3DSurface9_Release(bb); }
+    if (ref) for (y = 0; y < rh && y < my_h; y++) memset(ref + (size_t)y * my_w, 0, (size_t)(rw < my_w ? rw : my_w));
+}
+
 /* A zoomed frame's map part begins. The caller then makes WA's display and frame describe a map of rw x rh pixels in a
  * frame of `stride` bytes a row and `rows` rows (the largest map it will ever ask for: the same every frame), at the
  * address this returns, and has WA draw the map into it at WA's own scale. NULL: not this frame (draw it unzoomed). */
@@ -1745,6 +1788,7 @@ WKD3D_API void *__cdecl wkDirect3D_MapBegin(int stride, int rows, int rw, int rh
     target_swap();
     frame_clean();
     zm_rw = rw; zm_rh = rh;
+    map_clear(dev, rw, rh);
     cpu_maybe = 0;
     return my_frame;
 }

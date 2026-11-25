@@ -13,29 +13,29 @@ They do **not** exercise most of the other modules' own features (see "Not teste
 
 | Module | fps without wkMapZoom | fps with wkMapZoom | The graphics card drew | Check | Notes |
 |---|---|---|---|---|---|
-| (wkMapZoom alone) | 994 | 2226 | every frame | 1200 frames, 0 differ |  |
-| wkRemapKeys | 914 | 2244 | every frame | 1200 frames, 0 differ |  |
-| wkRealTime 0.0.9.2 (wkZRealTime) | 921 | 2268 | every frame | 1200 frames, 0 differ |  |
-| WormForge 0.9.9 (wkLua) | 879 | 2043 | every frame | 1200 frames, 0 differ | no mods enabled; the notice about WormForge is shown at the start |
-| wkVista 0.1.4 | 291 | 2252 | every frame | 1200 frames, 0 differ | at 1x, an ordinary map; wkVista's own true-colour step is not run in the frames the graphics card draws (same picture) |
-| wkZoom 0.2.0 | 848 | 2186 | every frame | 1200 frames, 0 differ | default scale |
-| wkZoom 0.2.0 with `[Camera] Scale=2` | 1361 to 1516 | 1546 | none (it stood aside) |  | wkZoom draws the zoomed picture itself: wkMapZoom's drawing stands aside after 8 frames, and the picture is wkZoom's |
-| wkRGBA (repo build) | 896 | 2176 | every frame | 1200 frames, 0 differ | no full-colour map in this run |
-| wkJellyWorm 3.8.1 v1 | 934 | 2528 | every frame | 800 frames, 0 differ | its own renderer is off by default; it hooks WA's drawing queue, so wkMapZoom's zoom is not put in beside it (see below) |
-| wkTerrainSync 1.2.6.1 | 1014 | 2264 | every frame | 1200 frames, 0 differ |  |
-| wkTrackMeBetter 3.8.1 | 916 | 2227 | every frame | 1200 frames, 0 differ |  |
-| wkPin 1.0.0.8 | 948 | 2198 | every frame | 1200 frames, 0 differ |  |
-| wkVolumeControl | 975 | 2311 | every frame | 1200 frames, 0 differ |  |
-| wkWall2Wall | 874 | 2245 | every frame | 1200 frames, 0 differ |  |
-| wkSuperFrontend | 915 | 2208 | every frame | 1200 frames, 0 differ |  |
-| wkHelp | 840 | 2209 | every frame | 1200 frames, 0 differ |  |
-| wkTrackTime | 898 | 2211 | every frame | 1200 frames, 0 differ |  |
-| wkPlaceWorms | 951 | 2285 | every frame | 1200 frames, 0 differ |  |
-| wkRopeRaceDirection | 735 | 2192 | every frame | 1200 frames, 0 differ |  |
-| wkSetRes (wkSetResCustom) | 991 | 2217 | every frame | 1000 frames, 0 differ |  |
-| wkGolf | 793 | 1461 | every frame | 1000 frames, 0 differ |  |
-| wkCrateEditor 1.0 | 937 | 2282 | every frame | 1200 frames, 0 differ |  |
-| wkD3D9Wnd 0.7.1.1 | 929 | 2207 | every frame | 1200 frames, 0 differ | made for WA 3.7; nothing seen of it on 3.8.1 |
+| (wkMapZoom alone) | 994 | 2135 | every frame | 1200 frames, 0 differ |  |
+| wkRemapKeys | 914 | 2148 | every frame | 1200 frames, 0 differ |  |
+| wkRealTime 0.0.9.2 (wkZRealTime) | 921 | 2146 | every frame | 1200 frames, 0 differ |  |
+| WormForge 0.9.9 (wkLua) | 879 | 1956 | every frame | 1000 frames, 0 differ | no mods enabled; the notice about WormForge is shown at the start |
+| wkVista 0.1.4 | 291 | 2130 | every frame | 1200 frames, 0 differ | at 1x, an ordinary map; wkVista's own true-colour step is not run in the frames the graphics card draws (same picture) |
+| wkZoom 0.2.0 | 848 | 2105 | every frame | 1200 frames, 0 differ | default scale |
+| wkZoom 0.2.0 with `[Camera] Scale=2` | 1361 to 1516 | 1426 | none (it stood aside) |  | wkZoom draws the zoomed picture itself: wkMapZoom's drawing stands aside after 8 frames, and the picture is wkZoom's |
+| wkRGBA (repo build) | 896 | 2055 | every frame | 1200 frames, 0 differ | no full-colour map in this run |
+| wkJellyWorm 3.8.1 v1 | 934 | 1786 | every frame | 800 frames, 0 differ | its own renderer is off by default; it hooks WA's drawing queue, so wkMapZoom's zoom is not put in beside it (see below) |
+| wkTerrainSync 1.2.6.1 | 1014 | 2158 | every frame | 1200 frames, 0 differ |  |
+| wkTrackMeBetter 3.8.1 | 916 | 2090 | every frame | 1000 frames, 0 differ |  |
+| wkPin 1.0.0.8 | 948 | 2183 | every frame | 1200 frames, 0 differ |  |
+| wkVolumeControl | 975 | 2175 | every frame | 1200 frames, 0 differ |  |
+| wkWall2Wall | 874 | 2157 | every frame | 1200 frames, 0 differ |  |
+| wkSuperFrontend | 915 | 2203 | every frame | 1200 frames, 0 differ |  |
+| wkHelp | 840 | 2134 | every frame | 1200 frames, 0 differ |  |
+| wkTrackTime | 898 | 2183 | every frame | 1200 frames, 0 differ |  |
+| wkPlaceWorms | 951 | 2186 | every frame | 1200 frames, 0 differ |  |
+| wkRopeRaceDirection | 735 | 2135 | every frame | 1200 frames, 0 differ |  |
+| wkSetRes (wkSetResCustom) | 991 | 2195 | every frame | 1000 frames, 0 differ |  |
+| wkGolf | 793 | 1412 | every frame | 1000 frames, 0 differ |  |
+| wkCrateEditor 1.0 | 937 | 2202 | every frame | 1000 frames, 0 differ |  |
+| wkD3D9Wnd 0.7.1.1 | 929 | 2094 | every frame | 1200 frames, 0 differ | made for WA 3.7; nothing seen of it on 3.8.1 |
 
 No crash and no ERRORLOG.TXT in any of these runs.
 
@@ -43,10 +43,10 @@ No crash and no ERRORLOG.TXT in any of these runs.
 
 | Loaded together | fps | |
 |---|---|---|
-| wkMapZoom + wkFastDraw | 2283 | the graphics card drew every frame |
-| the same + WormForge 0.9.9 | 2090 | the graphics card drew every frame; the notice about WormForge is shown |
-| the same + wkVista 0.1.4 | 2218 | the graphics card drew every frame |
-| wkMapZoom, wkFastDraw, wkSpeedometer, wkModMenu, wkRealTime, wkTerrainSync, wkTrackMeBetter, wkPin, wkVolumeControl, wkWall2Wall, wkSuperFrontend, wkRemapKeys | 1297 | the graphics card drew every frame |
+| wkMapZoom + wkFastDraw | 2161 | the graphics card drew every frame |
+| the same + WormForge 0.9.9 | 2001 | the graphics card drew every frame; the notice about WormForge is shown |
+| the same + wkVista 0.1.4 | 2190 | the graphics card drew every frame |
+| wkMapZoom, wkFastDraw, wkSpeedometer, wkModMenu, wkRealTime, wkTerrainSync, wkTrackMeBetter, wkPin, wkVolumeControl, wkWall2Wall, wkSuperFrontend, wkRemapKeys | 1257 | the graphics card drew every frame |
 
 Zoomed, with the check on: wkMapZoom at 35% with wkSpeedometer, wkModMenu and wkFastDraw (1920x1080): every frame
 zoomed, 0 pixels differ in the 200 frames compared. A game played to its end at 50% with those three, the Mods panel
@@ -60,6 +60,9 @@ used on the way (the drawing switched off and on in it): WA closed by itself, 0 
 - **wkVista, wkZoom, WormForge's zoom** are zoom modules too. They ran beside wkMapZoom at 1:1 without a crash, but two
   modules cannot both zoom the map: keep one of them in the WA folder. When wkZoom zooms the map itself, the picture
   arrives almost whole from it and wkMapZoom's drawing stands aside.
+- **The display's rectangle fill** (`0056B810`) is hooked by wkMapZoom to draw the water and the sky across the whole
+  zoomed view. When another module has changed that function first, wkMapZoom leaves it alone (the log says so): zoomed
+  far out, the water and the sky then end where WA ends them.
 - **wkSpeedometer, wkModMenu** look for wkMapZoom and draw through it (the dial, the line, the Mods panel).
 - **wkFastDraw** speeds up WA's own drawing on the CPU. With wkMapZoom the graphics card draws those frames instead;
   wkFastDraw still helps in the frames WA draws itself.
