@@ -2042,8 +2042,13 @@ static uint32_t *__attribute__((fastcall)) hook_show(void *be, uint32_t *result,
     restore_states();
     r = orig_show(be, result, frame);
     last_wa_frame = (uintptr_t)frame;
+    /* Only a game's frames are taken over. WA's menus are shown through this same function, and their pictures are put
+     * together with the same blits: taken over, a menu flickered (it is drawn piece by piece, not whole each frame), was
+     * given back after 8 frames as "comes whole from elsewhere", and was tried again every 512 frames -- every 8 seconds
+     * in a lobby (the owner, 2026-11-24). The game session, and its display in it, is there only while a game runs. */
     if (cooldown) cooldown--;
-    else if (!opt_off && !user_off && !failed && passive_blits && frame && *result == P32(VA(BE_OK_VA)) && (!read_seen || frames - read_seen > 120)) {
+    else if (!opt_off && !user_off && !failed && passive_blits && frame && *result == P32(VA(BE_OK_VA)) && wa_display() &&
+             (!read_seen || frames - read_seen > 120)) {
         const int w = PI32(VA(FRAME_W_VA)), h = PI32(VA(FRAME_H_VA));
         IDirect3DDevice9 *dev = (IDirect3DDevice9 *)(uintptr_t)P32((uintptr_t)be + BE_DEV);
         if (dev && !*(uint8_t *)((uintptr_t)be + BE_LOST) && w == PI32((uintptr_t)be + BE_W) && h == PI32((uintptr_t)be + BE_H) &&

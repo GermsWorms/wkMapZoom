@@ -64,7 +64,7 @@
 #include "zoom_badge.h"
 #include "camera_glide.h"
 
-#define VERSION "6.2 beta"
+#define VERSION "6.3 beta"
 
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020a
